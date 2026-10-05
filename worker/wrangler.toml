@@ -33,7 +33,7 @@ compatibility_flags = ["python_workers", "disable_python_external_sdk"]
 [[d1_databases]]
 binding = "DB"
 database_name = "swarmgit"
-database_id = "REPLACE-ME"
+database_id = "f09f6b1d-b0b2-4081-af1c-e474319afbbc"
 
 # Queue: task-lifecycle messages (verify / merge / artifact_push).
 # claim/submit/attest enqueue and return immediately; the consumer below

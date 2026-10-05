@@ -1,0 +1,346 @@
+"""SwarmGit task lifecycle: bounty-coordinated code forge state machine.
+
+Adapted from the TestSwarm scaffold's swarmlib.py economics
+(post/list/run/verify/settle, stake-to-test, reproduce-to-release,
+per-task escrow, reputation) to coding tasks on Artifacts forks:
+
+  open → claimed → working → submitted → verifying → merging → settled
+     ↘ expired (bounty returned)      ↘ disputed (not built: see README)
+
+Settlement is DRY-RUN ONLY until Richard's POST /agent/send primitive
+exists. Every ledger event carries settlement="dry_run"; the Sender
+interface (sender.py) is real-ready, not a stub.
+"""
+import time
+
+import artifacts as artifacts_mod
+
+
+class GitError(Exception):
+    pass
+
+
+def nid(prefix):
+    import secrets
+    return prefix + secrets.token_hex(8)
+
+
+WORKER_SHARE = 0.80   # bounty fraction to the winning worker agent
+VERIFIER_SHARE = 0.20  # split evenly across passing verifiers
+
+
+def split_bounty(bounty_sats, verifiers):
+    """(worker_sats, {verifier: sats}). Deterministic, documented."""
+    worker = int(bounty_sats * WORKER_SHARE)
+    rest = bounty_sats - worker
+    per = rest // max(1, len(verifiers))
+    return worker, {v: per for v in verifiers}
+
+
+# ---------------------------------------------------------------- post
+
+async def post_task(store, spec, task_id=None):
+    """Validate a task spec, create the task, lock escrow (dry-run)."""
+    repo = (spec.get("repo") or "").strip()
+    if not repo:
+        raise GitError("refused: repo is required (Artifacts repo name)")
+    title = (spec.get("title") or "").strip()
+    if not title:
+        raise GitError("refused: title is required")
+    tests = spec.get("acceptance_tests")
+    if not isinstance(tests, list) or not tests:
+        raise GitError("refused: acceptance_tests must be a non-empty list")
+    for i, t in enumerate(tests):
+        if not isinstance(t, dict) or not t.get("name"):
+            raise GitError(f"refused: acceptance_tests[{i}] needs a 'name'")
+    bounty = spec.get("bounty_sats")
+    if not isinstance(bounty, int) or isinstance(bounty, bool) \
+            or bounty < 0:
+        raise GitError("refused: bounty_sats must be a non-negative int")
+    task_id = task_id or nid("task_")
+    task = {
+        "task_id": task_id,
+        "status": "open",
+        "repo": repo,
+        "bounty_sats": bounty,
+        "poster": spec.get("poster", "anon"),
+        "title": title,
+        "description": spec.get("description", ""),
+        "acceptance_tests": tests,
+        "deadline_at": int(spec.get("deadline_at", 0)),
+        "created_at": int(time.time()),
+    }
+    await store.put_task(task)
+    await store.ledger_add("escrow_lock", task_id, task["poster"], bounty,
+                           {"note": "bounty escrowed on posting",
+                            "settlement": "dry_run"})
+    return task
+
+
+# ---------------------------------------------------------------- claim
+
+async def claim_task(store, artifacts, task_id, agent):
+    """Agent claims a task: exactly one claim per agent (DDL UNIQUE),
+    mints a private Artifacts fork with a short-lived repo-scoped token."""
+    agent = (agent or "").strip() or "anon"
+    task = await store.get_task(task_id)
+    if not task:
+        raise GitError("refused: task not found")
+    if task["status"] not in ("open", "claimed"):
+        raise GitError(f"refused: task is {task['status']}, not claimable")
+    if await store.claim_exists(task_id, agent):
+        raise GitError("refused: double-claim — this agent already has a"
+                       f" claim on {task_id}")
+    claim_id = nid("claim_")
+    fork_name = f"{task['repo']}-task-{task_id[-6:]}-{agent[:16]}"
+    try:
+        fork = await artifacts.fork_repo(task["repo"], fork_name)
+    except artifacts_mod.ArtifactsError as e:
+        raise GitError(f"refused: fork failed: {e}")
+    token = await artifacts.issue_token(fork["repo_name"], ttl_s=86400)
+    claim = {
+        "id": claim_id,
+        "task_id": task_id,
+        "agent": agent,
+        "status": "active",
+        "fork_id": fork["fork_id"],
+        # last4 only — the full token is shown once in the claim_task
+        # response and never persisted anywhere (board-safe).
+        "repo_token_last4": token[-4:] if token else "",
+        "created_at": int(time.time()),
+    }
+    fork_rec = {
+        "fork_id": fork["fork_id"],
+        "task_id": task_id,
+        "claim_id": claim_id,
+        "repo_name": fork["repo_name"],
+        "preview_url": "",
+        "status": "working",
+        "created_at": int(time.time()),
+    }
+    await store.put_claim(claim)
+    await store.put_fork(fork_rec)
+    if task["status"] == "open":
+        task["status"] = "claimed"
+        await store.put_task(task)
+    return {"claim_id": claim_id, "fork_id": fork["fork_id"],
+            "repo_name": fork["repo_name"],
+            "repo_token_last4": token[-4:] if token else "",
+            "_token": token}  # handed to the claiming agent only
+
+
+# ---------------------------------------------------------------- submit
+
+async def submit_work(store, task_id, claim_id, agent, preview_url=""):
+    """Agent submits a fork for verification. Returns the queue payload
+    the caller should enqueue (kind=verify)."""
+    claim = await store.get_claim(claim_id)
+    if not claim or claim["task_id"] != task_id:
+        raise GitError("refused: claim not found for this task")
+    if claim["agent"] != agent:
+        raise GitError("refused: claim belongs to another agent")
+    if claim["status"] != "active":
+        raise GitError(f"refused: claim is {claim['status']}, not active")
+    fork = await store.get_fork(claim["fork_id"])
+    if not fork or fork["status"] != "working":
+        raise GitError("refused: fork is not in working state")
+    fork["status"] = "submitted"
+    if preview_url:
+        fork["preview_url"] = preview_url
+    await store.put_fork(fork)
+    claim["status"] = "submitted"
+    await store.put_claim(claim)
+    task = await store.get_task(task_id)
+    task["status"] = "submitted"
+    await store.put_task(task)
+    return {"kind": "verify", "task_id": task_id,
+            "fork_id": fork["fork_id"]}
+
+
+# ---------------------------------------------------------------- verify
+
+async def attest_verification(store, fork_id, verifier, verdict,
+                              stake_sats=0, repro=""):
+    """Verifier attests pass/fail on a fork. Stake is locked (dry-run).
+    A fail verdict MUST include a repro (reproduce-to-release).
+    Returns {"ready_for_merge": bool} — first verified pass wins."""
+    verifier = (verifier or "").strip() or "anon"
+    fork = await store.get_fork(fork_id)
+    if not fork:
+        raise GitError("refused: fork not found")
+    if fork["status"] not in ("submitted", "verifying"):
+        raise GitError(f"refused: fork is {fork['status']}, not verifiable")
+    claim = await store.get_claim(fork["claim_id"])
+    if claim and claim["agent"] == verifier:
+        raise GitError("refused: cannot verify your own work")
+    if await store.verifier_attested(fork_id, verifier):
+        raise GitError("refused: this verifier already attested this fork")
+    if verdict not in ("pass", "fail"):
+        raise GitError("refused: verdict must be 'pass' or 'fail'")
+    if verdict == "fail" and not (repro or "").strip():
+        raise GitError("refused: a fail verdict must include a repro"
+                       " (reproduce-to-release)")
+    if not isinstance(stake_sats, int) or isinstance(stake_sats, bool) \
+            or stake_sats < 0:
+        raise GitError("refused: stake_sats must be a non-negative int")
+    verif = {
+        "fork_id": fork_id,
+        "verifier": verifier,
+        "verdict": verdict,
+        "stake_sats": stake_sats,
+        "repro": repro or "",
+        "created_at": int(time.time()),
+    }
+    await store.add_verification(verif)
+    await store.ledger_add("stake_lock", fork["task_id"], verifier,
+                           stake_sats,
+                           {"fork_id": fork_id, "verdict": verdict,
+                            "settlement": "dry_run"})
+    await store.bump_reputation(verifier, tasks_verified=1)
+    if verdict == "fail":
+        fork["status"] = "rejected"
+        await store.put_fork(fork)
+        if claim:
+            claim["status"] = "lost"
+            await store.put_claim(claim)
+        await store.bump_reputation(verifier, score=1)
+        return {"ok": True, "verdict": "fail", "ready_for_merge": False}
+    # pass: first verified pass wins the task
+    task = await store.get_task(fork["task_id"])
+    existing = await store.merges_for_task(task["task_id"])
+    if existing:
+        # task already decided; this pass is recorded but moot
+        return {"ok": True, "verdict": "pass", "ready_for_merge": False,
+                "note": "task already has a merge; attestation recorded"}
+    fork["status"] = "verifying"
+    await store.put_fork(fork)
+    task["status"] = "verifying"
+    await store.put_task(task)
+    await store.bump_reputation(verifier, score=2)
+    return {"ok": True, "verdict": "pass", "ready_for_merge": True,
+            "merge_payload": {"kind": "merge", "task_id": task["task_id"],
+                              "fork_id": fork_id}}
+
+
+# ---------------------------------------------------------------- merge
+
+async def record_merge(store, task_id, fork_id, audit_report, why_refs,
+                       decision="merged"):
+    """Persist the merge decision. Called by the queue consumer after
+    the merge gate runs. why_refs: list of why-entry ids."""
+    merge_id = nid("merge_")
+    fork = await store.get_fork(fork_id)
+    task = await store.get_task(task_id)
+    merge = {
+        "merge_id": merge_id,
+        "task_id": task_id,
+        "fork_id": fork_id,
+        "decision": decision,
+        "audit_report": audit_report or {},
+        "why_refs": why_refs or [],
+        "merged_at": int(time.time()),
+    }
+    await store.put_merge(merge)
+    if decision == "merged":
+        fork["status"] = "merged"
+        task["status"] = "merging"
+        claim = await store.get_claim(fork["claim_id"])
+        if claim:
+            claim["status"] = "won"
+            await store.put_claim(claim)
+        # losing forks: mark lost
+        for f in await store.forks_for_task(task_id):
+            if f["fork_id"] != fork_id and f["status"] in (
+                    "submitted", "verifying", "working"):
+                f["status"] = "rejected"
+                await store.put_fork(f)
+                c = await store.get_claim(f["claim_id"])
+                if c and c["status"] in ("active", "submitted"):
+                    c["status"] = "lost"
+                    await store.put_claim(c)
+    else:  # gate_blocked
+        fork["status"] = "gate_blocked"
+        task["status"] = "open"  # bounty stays available for other forks
+        claim = await store.get_claim(fork["claim_id"])
+        if claim:
+            claim["status"] = "gate_blocked"
+            await store.put_claim(claim)
+    await store.put_fork(fork)
+    await store.put_task(task)
+    return merge
+
+
+# ---------------------------------------------------------------- settle
+
+async def settle_task(store, sender, task_id, idempotency_key=""):
+    """DRY-RUN settlement: escrow release + payouts recorded in the
+    ledger via the Sender interface. No funds move: DryRunSender is the
+    only implementation until Richard's POST /agent/send exists."""
+    task = await store.get_task(task_id)
+    if not task:
+        raise GitError("refused: task not found")
+    if task["status"] != "merging":
+        raise GitError(f"refused: task is {task['status']}, not merging")
+    merges = await store.merges_for_task(task_id)
+    merged = [m for m in merges if m.get("decision") == "merged"]
+    if not merged:
+        raise GitError("refused: no merged fork to settle")
+    winner_fork_id = merged[0]["fork_id"]
+    winner_fork = await store.get_fork(winner_fork_id)
+    winner_claim = await store.get_claim(winner_fork["claim_id"])
+    winner = winner_claim["agent"]
+    verifs = await store.verifications_for_fork(winner_fork_id)
+    passing = sorted({v["verifier"] for v in verifs
+                      if v.get("verdict") == "pass"})
+    bounty = int(task["bounty_sats"])
+    worker_sats, verifier_sats = split_bounty(bounty, passing)
+    payouts = []
+    r = await sender.send(winner, worker_sats,
+                          f"swarmgit bounty: {task_id} winner")
+    payouts.append({"to": winner, "sats": worker_sats,
+                    "settlement": r.get("settlement", "dry_run"),
+                    "txid": r.get("txid")})
+    await store.ledger_add("payout", task_id, winner, worker_sats,
+                           {"role": "winner", "settlement": "dry_run",
+                            "txid": r.get("txid")})
+    for v, sats in verifier_sats.items():
+        rv = await sender.send(v, sats, f"swarmgit verifier: {task_id}")
+        payouts.append({"to": v, "sats": sats,
+                        "settlement": rv.get("settlement", "dry_run"),
+                        "txid": rv.get("txid")})
+        await store.ledger_add("payout", task_id, v, sats,
+                               {"role": "verifier", "settlement": "dry_run",
+                                "txid": rv.get("txid")})
+    await store.ledger_add("escrow_release", task_id, task["poster"],
+                           bounty,
+                           {"note": "escrow released to payouts",
+                            "settlement": "dry_run"})
+    await store.bump_reputation(winner, score=10, tasks_won=1)
+    task["status"] = "settled"
+    await store.put_task(task)
+    return {"ok": True, "task_id": task_id, "dry_run": True,
+            "funds_moved": False, "bounty_sats": bounty,
+            "winner": winner, "payouts": payouts,
+            "note": "DRY-RUN ONLY. Ledger entries above are local"
+                    " accounting. Live sats move only via Richard's"
+                    " POST /agent/send primitive — not wired yet."}
+
+
+# ---------------------------------------------------------------- expiry
+
+async def maybe_expire(store, task_id, now=None):
+    """Mark a task expired past its deadline; bounty returns to poster
+    (dry-run ledger). Returns True if it expired."""
+    now = int(now or time.time())
+    task = await store.get_task(task_id)
+    if not task or task["status"] in ("settled", "expired"):
+        return False
+    if not task.get("deadline_at") or now < int(task["deadline_at"]):
+        return False
+    task["status"] = "expired"
+    await store.put_task(task)
+    await store.ledger_add("escrow_release", task_id, task["poster"],
+                           int(task["bounty_sats"]),
+                           {"note": "bounty returned on expiry",
+                            "settlement": "dry_run"})
+    return True

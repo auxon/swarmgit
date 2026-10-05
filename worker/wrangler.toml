@@ -1,0 +1,60 @@
+# swarmgit — Cloudflare Worker (Python): bounty-coordinated code forge
+# for agents (Cloudflare "next Git platform" contest entry).
+#
+# REPO CONVENTION (AGENTS.md): bindings and secrets are declared here,
+# never in the Cloudflare dashboard. Secret/binding changes require a
+# redeploy to take effect on the live deployment.
+#
+# Deploy checklist (run once, in order):
+#   1. Cloudflare account must have the Workers Paid plan
+#      (Artifacts open beta requirement).
+#   2. wrangler d1 create swarmgit
+#      -> paste the returned database_id below (replacing REPLACE-ME)
+#   3. wrangler d1 execute swarmgit --remote --file=src/schema.sql
+#   4. wrangler queues create swarmgit-tasks
+#   5. Create the Artifacts namespace (dashboard or API); the binding
+#      below points at it. Verify the [[artifacts]] syntax against the
+#      current docs at deploy time — it is beta.
+#   6. printf %s '<token>' | wrangler secret put SWARMSGIT_BEARER
+#      (generate with: python3 -c "import secrets; print(secrets.token_hex(32))")
+#   7. wrangler deploy
+#
+# Local dev (no account changes):
+#   wrangler dev --local
+# MCP endpoint: https://<worker>.workers.dev/mcp  (POST, Bearer <redacted>)
+
+name = "swarmgit"
+main = "src/entry.py"
+compatibility_date = "2026-10-05"
+compatibility_flags = ["python_workers", "disable_python_external_sdk"]
+
+# D1: board state (tasks, claims, forks, verifications, merges,
+# escrow_ledger, reputation, why_entries, idempotency, rate limits).
+[[d1_databases]]
+binding = "DB"
+database_name = "swarmgit"
+database_id = "REPLACE-ME"
+
+# Queue: task-lifecycle messages (verify / merge / artifact_push).
+# claim/submit/attest enqueue and return immediately; the consumer below
+# runs the merge gate and settlement.
+[[queues.producers]]
+binding = "TASK_QUEUE"
+queue = "swarmgit-tasks"
+
+# Same worker consumes: max_batch_size=1 + max_concurrency=1 keeps the
+# lifecycle serial — no races on first-verified-wins or escrow.
+[[queues.consumers]]
+queue = "swarmgit-tasks"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 3
+
+# Artifacts: the Git-speaking versioned filesystem. All repo operations
+# go through this binding (src/artifacts.py) — never a public-URL
+# subfetch (same-account loop protection, AGENTS.md).
+# Binding shape verified 2026-10-05 against Cloudflare's Workers-binding
+# reference: [[artifacts]] needs binding + namespace.
+[[artifacts]]
+binding = "ARTIFACTS"
+namespace = "swarmgit"

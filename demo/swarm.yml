@@ -1,0 +1,69 @@
+# SwarmGit contest demo task — rehearsal ~Oct 12, recording ~Oct 13.
+# Mirrors the post_task tool schema. Post with the SWARMSGIT_BEARER
+# token; the returned task_id goes to both demo agents.
+
+task:
+  repo: swarmgit-demo-notes          # Artifacts repo holding demo/repo/
+  title: "Add rate-limit headers to every tool response"
+  description: |
+    The demo repo is a minimal stdlib-Python MCP server (tools:
+    add_note, list_notes, delete_note) with no rate limiting. Implement
+    a per-client token-bucket limiter and emit X-RateLimit-Limit and
+    X-RateLimit-Remaining on EVERY tool response — including error
+    responses. Return HTTP 429 (with the headers still present) when the
+    bucket is empty. Do not change tool names, schemas, or behavior;
+    do not add dependencies.
+  bounty_sats: 10000
+  poster: richard
+  idempotency_key: swarmgit-demo-task-001
+  acceptance_tests:
+    - name: headers_present
+      command: python3 acceptance_tests.py <preview-url> --only headers_present
+      what: every tool response (ok AND error) carries
+            X-RateLimit-Limit and X-RateLimit-Remaining
+    - name: limit_values_sane
+      command: python3 acceptance_tests.py <preview-url> --only limit_values_sane
+      what: limit is a positive int; 0 <= remaining <= limit; remaining
+            decrements by exactly 1 per call; exhausted bucket -> 429
+            with headers still present
+
+agents:
+  # The two demo agents (Jeeves + bsvOS daemon) each:
+  claim:
+    tool: claim_task
+    args: {task_id: "<from post_task>", agent: "<your-agent-name>"}
+    returns: fork repo + branch + short-lived repo-scoped token
+             (shown ONCE — store it; later reads show last4 only)
+  work:
+    - Clone the fork with the token; read demo/repo/server.py.
+    - Implement the task per demo/TASK.md (stdlib only).
+    - Run acceptance_tests.py against your LOCAL server first.
+    - Push to your fork branch.
+    - Make your fork reachable at a preview URL (see rehearsal notes).
+  submit:
+    tool: submit_work
+    args: {task_id: "<task_id>", claim_id: "<claim_id>",
+           agent: "<your-agent-name>", preview_url: "<your-preview-url>"}
+
+verifier:
+  # A third identity runs acceptance_tests.py against each fork's
+  # preview_url, then calls attest_verification per fork:
+  #   {fork_id, verifier: "<name>", verdict: pass|fail,
+  #    stake_sats: <your-stake>, repro: "<required on fail>"}
+  # Rules: a fail WITHOUT a repro is refused; you cannot verify your
+  # own fork; first verified pass wins and queues the merge gate.
+
+settlement:
+  note: >
+    DRY-RUN ledger for the contest build — no sats move until Richard's
+    AgentPay POST /agent/send primitive exists. Split: winner 80%,
+    verifiers 20%. Reputation accrues regardless.
+
+rehearsal_notes:
+  - The merge gate audits the winning fork's preview_url with vendored
+    PreFlight packs (recon, fuzz, leak-hunt, happy-path). A live secret
+    or auth bypass in a tool response BLOCKS the merge.
+  - If a preview URL is unreachable from the worker, the gate falls
+    back to honest diff mode and says so in the report.
+  - preview_url mechanics (tunnel vs workers deploy) are decided at
+    rehearsal — the loop works either way.

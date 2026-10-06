@@ -24,6 +24,23 @@ class ArtifactsError(Exception):
     pass
 
 
+def _js_opts(d):
+    """Convert an options dict to a plain JS object for binding RPC calls.
+
+    A Pyodide Proxy of a Python dict is NOT a valid RPC receiver type —
+    passing one raises DataCloneError (killed Jeeves' first live claim).
+    to_js with Object.fromEntries builds a real plain object. Under
+    tests (FakeArtifacts) this path is never touched; the plain-dict
+    fallback keeps the module importable without the Workers runtime.
+    Same idiom as http_fetch.py."""
+    try:
+        from js import Object
+        from pyodide.ffi import to_js
+        return to_js(dict(d), dict_converter=Object.fromEntries)
+    except Exception:
+        return dict(d)
+
+
 def _s(v, *attrs):
     """Defensively pull a string off a JsProxy-or-dict result."""
     if v is None:
@@ -54,11 +71,12 @@ class ArtifactsBackend:
         Returns {"repo_name", "remote", "token"}."""
         try:
             res = await self._b.create(
-                name, {"description": description or "SwarmGit task repo",
-                       "setDefaultBranch": "main"})
+                name, _js_opts(
+                    {"description": description or "SwarmGit task repo",
+                     "setDefaultBranch": "main"}))
             return {"repo_name": _s(res, "name") or name,
                     "remote": _s(res, "remote"),
-                    "token": _s(res, "token", "initialToken")}
+                    "token": _s(res, "token", "initialToken", "plaintext")}
         except Exception as e:
             raise ArtifactsError(f"create_repo failed: {e}")
 
@@ -68,8 +86,9 @@ class ArtifactsBackend:
         try:
             project = await self._b.get(repo_name)
             forked = await project.fork(
-                fork_name, {"description": "SwarmGit agent fork",
-                            "defaultBranchOnly": True})
+                fork_name, _js_opts(
+                    {"description": "SwarmGit agent fork",
+                     "defaultBranchOnly": True}))
             return {"fork_id": "fork_" + fork_name.replace("/", "-"),
                     "repo_name": _s(forked, "name") or fork_name,
                     "remote": _s(forked, "remote")}
@@ -81,7 +100,7 @@ class ArtifactsBackend:
         the launch blog — re-verify against current docs at deploy."""
         try:
             repo = await self._b.get(repo_name)
-            f = await repo.readFile({"ref": ref, "path": path})
+            f = await repo.readFile(_js_opts({"ref": ref, "path": path}))
             if f is None:
                 return None
             text = f.text() if hasattr(f, "text") else f
@@ -97,7 +116,9 @@ class ArtifactsBackend:
         try:
             repo = await self._b.get(repo_name)
             tok = await repo.createToken(scope, int(ttl_s))
-            return _s(tok, "token") or str(tok)
+            # Binding reference: createToken returns {plaintext, expiresAt},
+            # unlike create() whose field is `token` — check both.
+            return _s(tok, "plaintext", "token") or str(tok)
         except Exception as e:
             raise ArtifactsError(f"issue_token failed: {e}")
 

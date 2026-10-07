@@ -32,6 +32,11 @@ compatibility_flags = ["python_workers", "disable_python_external_sdk"]
 # automation + the contest run instructions).
 workers_dev = true
 
+# Public OAuth client id for the board's Google button (not a secret;
+# safe to ship). Empty until Richard creates the console client.
+[vars]
+GOOGLE_CLIENT_ID = ""
+
 # Zone routes (same pattern as trust + agentpay: path routes only, never
 # the apex). entry.py strips the /swarmgit mount prefix.
 routes = [

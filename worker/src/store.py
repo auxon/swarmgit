@@ -132,6 +132,17 @@ CREATE TABLE IF NOT EXISTS post_rate (
 )
     """,
     "CREATE INDEX IF NOT EXISTS idx_sgpost_rate_host ON post_rate(host, at)",
+    """
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id TEXT PRIMARY KEY,
+  sub TEXT NOT NULL,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+)
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sgsessions_exp ON sessions(expires_at)",
 ]
 
 
@@ -408,6 +419,28 @@ class D1Store:
             key, tool, json.dumps(result), fp, int(time.time()))
         await self._run("DELETE FROM idempotency WHERE at < ?",
                         int(time.time()) - 7 * 86400)
+
+    # -- sessions (Google sign-in) ---------------------------------
+    async def session_put(self, s):
+        await self._run(
+            "INSERT INTO sessions (session_id, sub, email, name,"
+            " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET"
+            " sub=excluded.sub, email=excluded.email, name=excluded.name,"
+            " created_at=excluded.created_at,"
+            " expires_at=excluded.expires_at",
+            s["session_id"], s["sub"], s.get("email", ""),
+            s.get("name", ""), int(s["created_at"]),
+            int(s["expires_at"]))
+
+    async def session_get(self, session_id):
+        return await self._first(
+            "SELECT session_id, sub, email, name, created_at, expires_at"
+            " FROM sessions WHERE session_id = ?", session_id)
+
+    async def session_delete(self, session_id):
+        await self._run("DELETE FROM sessions WHERE session_id = ?",
+                        session_id)
 
     # -- rate limiting ----------------------------------------------
     async def rate_allow(self, key, limit=5, window=3600):

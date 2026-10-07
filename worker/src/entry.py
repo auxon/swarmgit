@@ -23,6 +23,7 @@ import consumer as consumer_mod  # noqa: E402
 import artifacts as artifacts_mod  # noqa: E402
 from sender import DryRunSender  # noqa: E402
 import board as board_mod  # noqa: E402
+import auth as auth_mod  # noqa: E402
 
 JSON = {"Content-Type": "application/json"}
 
@@ -136,15 +137,66 @@ class Default(WorkerEntrypoint):
                                                  "stateless POST only"}),
                             status=405, headers=JSON)
 
+        if path == "/auth/config" and method == "GET":
+            cid = (getattr(self.env, "GOOGLE_CLIENT_ID", "") or "").strip()
+            return Response(json.dumps({"configured": bool(cid),
+                                        "clientId": cid}), headers=JSON)
+
+        if path == "/auth/me" and method == "GET":
+            store = await self._db()
+            sess = await auth_mod.get_session(
+                store, self._session_id(request))
+            if not sess:
+                return Response(json.dumps({"signedIn": False}),
+                                status=401, headers=JSON)
+            return Response(json.dumps(
+                {"signedIn": True, "email": sess.get("email", ""),
+                 "name": sess.get("name", "")}), headers=JSON)
+
+        if path == "/auth/logout" and method == "POST":
+            store = await self._db()
+            sid = self._session_id(request)
+            if sid:
+                try:
+                    await store.session_delete(sid)
+                except Exception:
+                    pass
+            return Response(json.dumps({"ok": True}), headers={
+                **JSON, "Set-Cookie": auth_mod.clear_cookie_header()})
+
+        if path == "/auth/google" and method == "POST":
+            try:
+                rpc = _to_py(await request.json()) or {}
+            except Exception:
+                return Response(json.dumps(
+                    {"ok": False, "error": "parse error"}),
+                    status=400, headers=JSON)
+            cid = (getattr(self.env, "GOOGLE_CLIENT_ID", "") or "").strip()
+            try:
+                ident = await auth_mod.verify_google_id_token(
+                    self._http, rpc.get("id_token"), cid)
+            except auth_mod.AuthError as e:
+                return Response(json.dumps(
+                    {"ok": False, "error": str(e)}),
+                    status=401, headers=JSON)
+            store = await self._db()
+            sid = await auth_mod.mint_session(store, ident)
+            return Response(json.dumps(
+                {"ok": True, "email": ident["email"],
+                 "name": ident["name"]}), headers={
+                **JSON,
+                "Set-Cookie": auth_mod.session_cookie_header(sid)})
+
         if path != "/mcp" or method != "POST":
             return Response(json.dumps({"error": "not found"}),
                             status=404, headers=JSON)
 
-        if not self._authed(request):
+        if not await self._authed(request):
             # Never 502/504 from this worker (Cloudflare edge strips
             # them); 401 passes through untouched.
-            return Response(json.dumps({"error": "unauthorized: valid "
-                                                 "bearer token required"}),
+            return Response(json.dumps({"error": "unauthorized: sign in "
+                                                 "with Google or present a "
+                                                 "valid bearer token"}),
                             status=401, headers=JSON)
         try:
             body = _to_py(await request.json())
@@ -161,16 +213,32 @@ class Default(WorkerEntrypoint):
             return Response("", status=status)
         return Response(json.dumps(resp), status=status, headers=JSON)
 
-    def _authed(self, request):
+    def _session_id(self, request):
+        try:
+            cookies = auth_mod.parse_cookies(
+                request.headers.get("Cookie") or "")
+        except Exception:
+            return ""
+        return cookies.get(auth_mod.SESSION_COOKIE, "")
+
+    async def _authed(self, request):
+        """Bearer OR a valid Google session cookie. Bearer first (no
+        DB); session second (one indexed lookup). Fail closed."""
         try:
             headers = request.headers
             auth = headers.get("Authorization") or ""
         except Exception:
             return False
         expected = getattr(self.env, "SWARMSGIT_BEARER", "") or ""
-        if not expected:
-            return False  # fail closed: no secret configured, no access
-        return str(auth) == f"Bearer {expected}"
+        if expected and str(auth) == f"Bearer {expected}":
+            return True
+        try:
+            store = await self._db()
+            sess = await auth_mod.get_session(
+                store, self._session_id(request))
+        except Exception:
+            return False
+        return sess is not None
 
     async def _enqueue(self, msg):
         await self.env.TASK_QUEUE.send(msg)

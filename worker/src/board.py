@@ -130,10 +130,14 @@ a{color:#6aa8ff}
 """
 
 _POST_FORM = """
-<details class="task"><summary><span class="task-title">➕ Post a task</span><span class="task-meta">operator · bearer asked once per browser, kept in session only</span></summary>
-<div class="task-body"><form id="sg-post-form" class="sg-form" autocomplete="off">
-<label>Bearer token (operator secret — asked once, kept in this tab session only, never stored on disk)</label>
-<input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER once">
+<details class="task"><summary><span class="task-title">➕ Post a task</span><span class="task-meta">sign in with Google — no tokens to handle</span></summary>
+<div class="task-body"><div id="sg-auth">
+<div id="sg-gbtn"></div>
+<div id="sg-who" class="task-meta" style="margin:8px 0"></div>
+</div>
+<form id="sg-post-form" class="sg-form" autocomplete="off">
+<div id="sg-bearer-row"><label>Bearer token (operator fallback — only if not signed in)</label>
+<input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER once"></div>
 <div class="row"><div><label>Repo (new Artifacts repo name)</label><input id="sg-repo" required maxlength="80"></div>
 <div><label>Bounty (sats, integer)</label><input id="sg-bounty" required inputmode="numeric" pattern="[0-9]+" placeholder="1000"></div></div>
 <label>Title</label><input id="sg-title" required maxlength="140">
@@ -144,15 +148,35 @@ _POST_FORM = """
 <button type="submit">Post task (escrow locks on posting)</button>
 <div id="sg-out" class="sg-out" aria-live="polite"></div>
 </form></div></details>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 (function(){
 var f=document.getElementById('sg-post-form');if(!f)return;
 var out=document.getElementById('sg-out');
 var bEl=document.getElementById('sg-bearer');
-// Remember the bearer for this tab session only (sessionStorage clears
-// when the tab closes; never touches disk, cookies, or the server).
+var who=document.getElementById('sg-who');
+// Bearer fallback: remembered for this tab session only (sessionStorage
+// clears when the tab closes; never touches disk, cookies, or server).
 try{var s=sessionStorage.getItem('sg_bearer')||'';if(s){bEl.value=s;bEl.placeholder='saved for this tab session';}}catch(e){}
 bEl.addEventListener('input',function(){try{sessionStorage.setItem('sg_bearer',bEl.value);}catch(e){}});
+// Signed-in state: the session cookie (HttpOnly) rides along automatically.
+fetch('auth/me',{credentials:'same-origin'}).then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});}).then(function(p){
+if(p.s===200&&p.j.signedIn){who.textContent='signed in as '+(p.j.name||p.j.email||'Google user');document.getElementById('sg-bearer-row').style.display='none';}
+}).catch(function(){});
+// Google button (rendered once GIS loads and the client id is known).
+function gbtn(cid){
+if(!window.google||!google.accounts||!google.accounts.id)return;
+google.accounts.id.initialize({client_id:cid,callback:onGoogle,auto_select:false});
+google.accounts.id.renderButton(document.getElementById('sg-gbtn'),{theme:'filled_black',size:'large',text:'signin_with'});
+}
+function onGoogle(resp){
+fetch('auth/google',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_token:resp.credential})}).then(function(r){return r.json();}).then(function(j){
+if(j.ok){location.reload();}else{out.className='sg-out sg-err';out.textContent='sign-in refused: '+(j.error||'unknown');}
+}).catch(function(e){out.className='sg-out sg-err';out.textContent='sign-in error: '+e;});
+}
+fetch('auth/config',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(c){
+if(c&&c.clientId){var t=0;var iv=setInterval(function(){t++;if(window.google&&google.accounts&&google.accounts.id){clearInterval(iv);gbtn(c.clientId);}else if(t>50){clearInterval(iv);}},100);}
+}).catch(function(){});
 f.addEventListener('submit',async function(ev){
 ev.preventDefault();out.className='sg-out';out.textContent='posting…';
 function v(id){return (document.getElementById(id).value||'').trim();}
@@ -162,7 +186,9 @@ repo:v('sg-repo'),title:v('sg-title'),description:v('sg-desc'),acceptance_tests:
 bounty_sats:parseInt(v('sg-bounty')||'0',10),deadline_at:parseInt(v('sg-deadline')||'0',10)||0,
 poster:v('sg-poster')||'anon',idempotency_key:(crypto.randomUUID?crypto.randomUUID():'post-'+Date.now())}}};
 try{
-var r=await fetch('mcp',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+document.getElementById('sg-bearer').value},body:JSON.stringify(body)});
+var hdrs={'Content-Type':'application/json'};
+if(bEl.value)hdrs['Authorization']='Bearer '+bEl.value;
+var r=await fetch('mcp',{method:'POST',credentials:'same-origin',headers:hdrs,body:JSON.stringify(body)});
 var j=await r.json();
 var t=j&&j.result&&j.result.content&&j.result.content[0]&&j.result.content[0].text;
 var p=t?JSON.parse(t):{ok:false,error:(j&&j.error&&j.error.message)||('HTTP '+r.status)};

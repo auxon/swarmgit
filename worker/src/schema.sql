@@ -122,3 +122,13 @@ CREATE TABLE IF NOT EXISTS post_rate (
   at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sgpost_rate_host ON post_rate(host, at);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id TEXT PRIMARY KEY,
+  sub TEXT NOT NULL,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sgsessions_exp ON sessions(expires_at);

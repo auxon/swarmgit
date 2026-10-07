@@ -180,19 +180,27 @@ TOOLS = [
         },
     },
     {
-        # TEMPORARY operator tool (pilot incident): re-enqueue lifecycle
-        # messages the queue consumer dropped before the body-coercion
-        # fix. Removed before the contest submission.
-        "name": "redrive_task",
+        # Dispute a fork's verification outcome; Clef arbitrates
+        # automatically (see arbiter.py). Grounds AND repro required.
+        "name": "dispute_fork",
         "description": (
-            "TEMPORARY operator recovery: re-enqueue dropped verify/merge"
-            " queue messages for a task (submitted forks -> verify,"
-            " pass-verified forks with no merge -> merge). " + DRY_RUN),
+            "Contest a decided fork's verification outcome"
+            " (rejected | verifying only). You cannot dispute your own"
+            " pass, and attesters cannot re-litigate. Grounds AND a repro"
+            " are required (reproduce-to-release). Freezes the fork until"
+            " Clef rules: high confidence applies automatically, low"
+            " confidence defers to a human operator. " + DRY_RUN +
+            "\nIdempotent: repeating with the same idempotency_key returns"
+            " the original dispute."),
         "inputSchema": {
             "type": "object",
-            "required": ["task_id", "idempotency_key"],
+            "required": ["fork_id", "disputer", "grounds", "repro",
+                         "idempotency_key"],
             "properties": {
-                "task_id": {"type": "string"},
+                "fork_id": {"type": "string"},
+                "disputer": {"type": "string"},
+                "grounds": {"type": "string"},
+                "repro": {"type": "string", "default": ""},
                 "idempotency_key": {"type": "string"},
             },
         },
@@ -301,8 +309,8 @@ async def _call_tool(store, deps, name, args):
         return await _get_merge_report(store, args)
     if name == "get_leaderboard":
         return await _get_leaderboard(store, args)
-    if name == "redrive_task":
-        return await _redrive_task(store, deps, args)
+    if name == "dispute_fork":
+        return await _dispute_fork(store, deps, args)
     raise GitError(f"unknown tool: {name}")  # unreachable
 
 
@@ -379,6 +387,7 @@ async def _get_task_status(store, args):
         f["verifications"] = await store.verifications_for_fork(
             f["fork_id"])
     merges = await store.merges_for_task(task_id)
+    disputes = await store.disputes_for_task(task_id)
     return {"ok": True,
             "task": {"task_id": task["task_id"],
                      "title": task.get("title", ""),
@@ -396,6 +405,12 @@ async def _get_task_status(store, args):
             "merges": [{"merge_id": m["merge_id"],
                         "decision": m.get("decision"),
                         "fork_id": m.get("fork_id")} for m in merges],
+            "disputes": [{"dispute_id": d["dispute_id"],
+                          "fork_id": d["fork_id"],
+                          "disputer": d["disputer"],
+                          "status": d["status"],
+                          "ruling": d.get("ruling", "")}
+                         for d in disputes],
             "ledger": await store.ledger_for_task(task_id)}
 
 
@@ -460,32 +475,17 @@ async def _get_leaderboard(store, args):
     return {"ok": True, "leaderboard": await store.leaderboard(limit)}
 
 
-async def _redrive_task(store, deps, args):
-    """TEMPORARY (pilot incident): re-enqueue dropped lifecycle messages."""
+async def _dispute_fork(store, deps, args):
     key = _need_key(args)
-    hit = _idem_hit(await store.idem_get(key), "redrive_task")
+    hit = _idem_hit(await store.idem_get(key), "dispute_fork")
     if hit:
         return hit
-    task_id = args.get("task_id", "")
-    task = await store.get_task(task_id)
-    if not task:
-        raise GitError("refused: task not found")
-    if task.get("status") == "settled":
-        raise GitError("refused: task already settled")
-    sent = []
-    merges = await store.merges_for_task(task_id)
-    for fork in await store.forks_for_task(task_id):
-        verifs = await store.verifications_for_fork(fork["fork_id"])
-        passed = [v for v in verifs if v.get("verdict") == "pass"]
-        if passed and not merges:
-            await deps["enqueue"]({"kind": "merge", "task_id": task_id,
-                                  "fork_id": fork["fork_id"]})
-            sent.append(("merge", fork["fork_id"]))
-        elif fork.get("status") == "submitted":
-            await deps["enqueue"]({"kind": "verify", "task_id": task_id,
-                                  "fork_id": fork["fork_id"]})
-            sent.append(("verify", fork["fork_id"]))
-    result = {"ok": True, "task_id": task_id, "requeued": sent,
-              "idempotent": False}
-    await store.idem_put(key, "redrive_task", result)
+    payload = await gitlib.dispute_fork(
+        store, args.get("fork_id", ""), args.get("disputer", ""),
+        args.get("grounds", ""), args.get("repro", ""))
+    await deps["enqueue"](payload)
+    result = {"ok": True, "dispute_id": payload.get("dispute_id", ""),
+              "fork_id": payload["fork_id"], "status": "disputed",
+              "arbitrate_queued": True, "idempotent": False}
+    await store.idem_put(key, "dispute_fork", result)
     return result

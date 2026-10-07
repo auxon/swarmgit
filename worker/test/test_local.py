@@ -453,9 +453,7 @@ async def main():
                             body={"jsonrpc": "2.0", "id": 1,
                                   "method": "tools/list"})
     check("entry: bearer -> tools/list 200",
-          s == 200 and len(b["result"]["tools"]) in (8, 9))
-    # TEMPORARY (pilot incident): 9 while redrive_task exists; back to 8
-    # when it is removed before the contest submission.
+          s == 200 and len(b["result"]["tools"]) == 9)
     s, _ = await fetch_json("GET", "/mcp",
                             headers={"Authorization": "Bearer test-token"})
     check("entry: GET /mcp -> 405", s == 405)

@@ -344,3 +344,116 @@ async def maybe_expire(store, task_id, now=None):
                            {"note": "bounty returned on expiry",
                             "settlement": "dry_run"})
     return True
+
+
+# ---------------------------------------------------------------- disputes
+# Fork-level arbitration decided by Clef (see arbiter.py). Adapted from
+# the winning pilot fork: the neutral-arbiter panel is replaced by the
+# decision model; low confidence defers to a human operator.
+
+async def dispute_fork(store, fork_id, disputer, grounds="", repro=""):
+    """Contest a fork's verification outcome. Decided forks only
+    (rejected | verifying); grounds AND repro required
+    (reproduce-to-release applies to disputes too); the worker cannot
+    dispute their own pass; attesters cannot re-litigate; one open
+    dispute per fork. Freezes fork + task at disputed and returns the
+    queue payload (kind=arbitrate) the caller should enqueue."""
+    disputer = (disputer or "").strip() or "anon"
+    fork = await store.get_fork(fork_id)
+    if not fork:
+        raise GitError("refused: fork not found")
+    if await store.open_dispute_for_fork(fork_id):
+        raise GitError("refused: fork already has an open dispute")
+    if fork["status"] not in ("rejected", "verifying"):
+        raise GitError(f"refused: fork is {fork['status']} — only a"
+                       " decided fork (rejected | verifying) can be"
+                       " disputed")
+    claim = await store.get_claim(fork["claim_id"])
+    worker = claim["agent"] if claim else ""
+    contested = "fail" if fork["status"] == "rejected" else "pass"
+    if disputer == worker and contested == "pass":
+        raise GitError("refused: you cannot dispute your own pass")
+    if await store.verifier_attested(fork_id, disputer):
+        raise GitError("refused: you already attested this fork —"
+                       " Clef arbitrates, not re-votes")
+    grounds = (grounds or "").strip()
+    repro = (repro or "").strip()
+    if not grounds:
+        raise GitError("refused: a dispute needs grounds"
+                       " (what is contested)")
+    if not repro:
+        raise GitError("refused: a dispute needs a repro"
+                       " (reproduce-to-release)")
+    dispute = {
+        "dispute_id": nid("dispute_"),
+        "fork_id": fork_id,
+        "task_id": fork["task_id"],
+        "disputer": disputer,
+        "grounds": grounds,
+        "repro": repro,
+        "contested": contested,
+        "status": "open",
+        "ruling": "",
+        "decided_at": 0,
+    }
+    await store.put_dispute(dispute)
+    fork["status"] = "disputed"
+    await store.put_fork(fork)
+    task = await store.get_task(fork["task_id"])
+    task["status"] = "disputed"
+    await store.put_task(task)
+    await store.ledger_add("dispute_open", fork["task_id"], disputer, 0,
+                           {"fork_id": fork_id,
+                            "contested_verdict": contested,
+                            "settlement": "dry_run"})
+    return {"kind": "arbitrate", "task_id": fork["task_id"],
+            "fork_id": fork_id, "dispute_id": dispute["dispute_id"]}
+
+
+async def apply_arbitration(store, dispute_id, ruling, confidence,
+                            genuine=0.0, severity=0, deferred=False,
+                            note=""):
+    """Apply a Clef ruling (or record a deferral). uphold = contested
+    verdict stands; overturn = flipped. Returns the outcome record."""
+    dispute = await store.get_dispute(dispute_id)
+    if not dispute:
+        raise GitError("refused: dispute not found")
+    if dispute["status"] != "open":
+        raise GitError("refused: dispute is already decided")
+    fork = await store.get_fork(dispute["fork_id"])
+    task = await store.get_task(dispute["task_id"])
+    if deferred or ruling not in ("uphold", "overturn"):
+        dispute["status"] = "deferred"
+        await store.put_dispute(dispute)
+        await store.ledger_add("arbitration_deferred", dispute["task_id"],
+                               "clef", 0,
+                               {"dispute_id": dispute_id,
+                                "confidence": confidence,
+                                "note": note or "low confidence",
+                                "settlement": "dry_run"})
+        return {"ok": True, "dispute_id": dispute_id, "deferred": True}
+    contested = dispute.get("contested", "") or "pass"
+    if ruling == "uphold":
+        new_fork = "rejected" if contested == "fail" else "verifying"
+        new_task = "open" if contested == "fail" else "verifying"
+    else:  # overturn
+        new_fork = "verifying" if contested == "fail" else "rejected"
+        new_task = "verifying" if contested == "fail" else "open"
+    dispute["status"] = "decided"
+    dispute["ruling"] = ruling
+    dispute["decided_at"] = int(time.time())
+    await store.put_dispute(dispute)
+    if fork:
+        fork["status"] = new_fork
+        await store.put_fork(fork)
+    if task:
+        task["status"] = new_task
+        await store.put_task(task)
+    await store.ledger_add("dispute_resolved", dispute["task_id"], "clef",
+                           0, {"dispute_id": dispute_id, "ruling": ruling,
+                               "confidence": confidence, "genuine": genuine,
+                               "severity": severity,
+                               "settlement": "dry_run"})
+    return {"ok": True, "dispute_id": dispute_id, "ruling": ruling,
+            "fork_status": new_fork, "task_status": new_task,
+            "needs_merge": new_fork == "verifying"}

@@ -99,11 +99,16 @@ class Default(WorkerEntrypoint):
 
     def _deps(self):
         """Per-request dependency bundle (fakes injected in tests)."""
+        try:
+            ai = getattr(self.env, "AI", None)
+        except Exception:
+            ai = None
         return {
             "enqueue": self._enqueue,
             "http": self._http,
             "artifacts": artifacts_mod.from_env(self.env),
             "sender": DryRunSender(),
+            "ai": ai,
         }
 
     async def _fetch_inner(self, request):
@@ -284,11 +289,16 @@ class Default(WorkerEntrypoint):
             artifacts = artifacts_mod.from_env(self.env)
         except Exception:
             artifacts = None
+        try:
+            ai = getattr(self.env, "AI", None)
+        except Exception:
+            ai = None
         deps = {
             "enqueue": self._enqueue,
             "http": self._http,
             "artifacts": artifacts,
             "sender": DryRunSender(),
+            "ai": ai,
         }
         for message in batch.messages:
             body = _queue_body(message.body)

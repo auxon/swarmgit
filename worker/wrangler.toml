@@ -74,3 +74,7 @@ max_retries = 3
 [[artifacts]]
 binding = "ARTIFACTS"
 namespace = "swarmgit"
+
+# Workers AI: Clef decision model arbitrates disputes (src/arbiter.py).
+[ai]
+binding = "AI"

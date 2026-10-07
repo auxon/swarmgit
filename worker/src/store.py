@@ -143,6 +143,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
     """,
     "CREATE INDEX IF NOT EXISTS idx_sgsessions_exp ON sessions(expires_at)",
+    """
+CREATE TABLE IF NOT EXISTS disputes (
+  dispute_id TEXT PRIMARY KEY,
+  fork_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  disputer TEXT NOT NULL,
+  grounds TEXT NOT NULL,
+  repro TEXT NOT NULL,
+  contested TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  ruling TEXT NOT NULL DEFAULT '',
+  decided_at INTEGER NOT NULL DEFAULT 0
+)
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sgdisputes_fork ON disputes(fork_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sgdisputes_task ON disputes(task_id)",
 ]
 
 
@@ -441,6 +457,37 @@ class D1Store:
     async def session_delete(self, session_id):
         await self._run("DELETE FROM sessions WHERE session_id = ?",
                         session_id)
+
+    # -- disputes (Clef arbitration) -------------------------------
+    async def put_dispute(self, d):
+        await self._run(
+            "INSERT INTO disputes (dispute_id, fork_id, task_id, disputer,"
+            " grounds, repro, contested, status, ruling, decided_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(dispute_id) DO UPDATE SET status=excluded.status,"
+            " ruling=excluded.ruling, decided_at=excluded.decided_at",
+            d["dispute_id"], d["fork_id"], d["task_id"], d["disputer"],
+            d["grounds"], d.get("repro", ""), d.get("contested", ""),
+            d["status"], d.get("ruling", ""), int(d.get("decided_at", 0)))
+
+    async def get_dispute(self, dispute_id):
+        return await self._first(
+            "SELECT dispute_id, fork_id, task_id, disputer, grounds, repro,"
+            " contested, status, ruling, decided_at FROM disputes"
+            " WHERE dispute_id = ?",
+            dispute_id)
+
+    async def open_dispute_for_fork(self, fork_id):
+        return await self._first(
+            "SELECT dispute_id FROM disputes WHERE fork_id = ?"
+            " AND status = 'open'", fork_id)
+
+    async def disputes_for_task(self, task_id):
+        rows = await self._all(
+            "SELECT dispute_id, fork_id, task_id, disputer, grounds, repro,"
+            " contested, status, ruling, decided_at FROM disputes"
+            " WHERE task_id = ? ORDER BY dispute_id", task_id)
+        return rows
 
     # -- rate limiting ----------------------------------------------
     async def rate_allow(self, key, limit=5, window=3600):

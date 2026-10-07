@@ -132,3 +132,21 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sgsessions_exp ON sessions(expires_at);
+
+-- Disputed arbitration: a contested verification outcome freezes the
+-- fork (status disputed) until Clef rules (see arbiter.py) or a human
+-- operator decides on low confidence.
+CREATE TABLE IF NOT EXISTS disputes (
+  dispute_id TEXT PRIMARY KEY,
+  fork_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  disputer TEXT NOT NULL,
+  grounds TEXT NOT NULL,
+  repro TEXT NOT NULL,
+  contested TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  ruling TEXT NOT NULL DEFAULT '',
+  decided_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sgdisputes_fork ON disputes(fork_id);
+CREATE INDEX IF NOT EXISTS idx_sgdisputes_task ON disputes(task_id);

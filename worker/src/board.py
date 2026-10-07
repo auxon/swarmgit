@@ -1,12 +1,19 @@
 """Read-only HTML status board for the SwarmGit contest demo (GET /board).
 
 Public and unauthenticated by design (it is the demo's visual), but
-strictly read-only: this module only calls the store's READ methods
-(list_tasks, claims_for_task, forks_for_task, verifications_for_fork,
-merges_for_task, why_entries_for_merge, leaderboard). It never writes
-to D1, mints anything, or touches escrow. Every dynamic value is
-html-escaped. Repo tokens are never shown in full — claims persist
-only the last4 (see gitlib.claim_task).
+the page itself is strictly read-only: this module only calls the
+store's READ methods (list_tasks, claims_for_task, forks_for_task,
+verifications_for_fork, merges_for_task, why_entries_for_merge,
+leaderboard). It never writes to D1, mints anything, or touches
+escrow. Every dynamic value is html-escaped. Repo tokens are never
+shown in full — claims persist only the last4 (see gitlib.claim_task).
+
+The page DOES include an operator posting form (_POST_FORM): pure
+client-side HTML/JS that calls the authenticated MCP endpoint
+(relative 'mcp') with a bearer the operator pastes in. The bearer
+lives only in the browser's memory for that request — it is never
+stored, rendered, or sent anywhere else. GET /board performs zero
+writes; POST /board is still 404.
 """
 import html
 import time
@@ -111,6 +118,54 @@ h3{font-size:14.5px;color:#c6cede;margin:18px 0 8px;text-transform:uppercase;let
 .empty{color:#8b93a7;font-style:italic;padding:14px 0}
 footer{margin-top:40px;color:#5c6579;font-size:13px;text-align:center}
 a{color:#6aa8ff}
+.sg-form label{display:block;margin:10px 0 4px;color:#8b93a7;font-size:13px}
+.sg-form input,.sg-form textarea{width:100%;background:#0b0e14;border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px;font:14px/1.5 inherit}
+.sg-form textarea{min-height:64px;resize:vertical}
+.sg-form .row{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.sg-form button{margin-top:14px;background:#f5b942;border:none;border-radius:8px;color:#14100a;font-weight:700;padding:10px 22px;font-size:14.5px;cursor:pointer}
+.sg-form button:hover{background:#ffc95e}
+.sg-out{margin-top:12px;font-size:13.5px}
+.sg-ok{color:#4ade80}
+.sg-err{color:#ff6b6b}
+"""
+
+_POST_FORM = """
+<details class="task"><summary><span class="task-title">➕ Post a task</span><span class="task-meta">operator · bearer stays in this browser tab only</span></summary>
+<div class="task-body"><form id="sg-post-form" class="sg-form" autocomplete="off">
+<label>Bearer token (operator secret — typed, never stored)</label>
+<input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER">
+<div class="row"><div><label>Repo (new Artifacts repo name)</label><input id="sg-repo" required maxlength="80"></div>
+<div><label>Bounty (sats, integer)</label><input id="sg-bounty" required inputmode="numeric" pattern="[0-9]+" placeholder="1000"></div></div>
+<label>Title</label><input id="sg-title" required maxlength="140">
+<label>Description</label><textarea id="sg-desc" maxlength="2000"></textarea>
+<label>Acceptance tests (one name per line)</label><textarea id="sg-tests" required placeholder="headers_present&#10;limit_values_sane"></textarea>
+<div class="row"><div><label>Deadline (optional, unix seconds)</label><input id="sg-deadline" inputmode="numeric" pattern="[0-9]*" placeholder="0 = none"></div>
+<div><label>Poster</label><input id="sg-poster" maxlength="40" placeholder="richard"></div></div>
+<button type="submit">Post task (escrow locks on posting)</button>
+<div id="sg-out" class="sg-out" aria-live="polite"></div>
+</form></div></details>
+<script>
+(function(){
+var f=document.getElementById('sg-post-form');if(!f)return;
+var out=document.getElementById('sg-out');
+f.addEventListener('submit',async function(ev){
+ev.preventDefault();out.className='sg-out';out.textContent='posting…';
+function v(id){return (document.getElementById(id).value||'').trim();}
+var tests=v('sg-tests').split(/\\n+/).map(function(s){return s.trim();}).filter(Boolean).map(function(n){return {name:n};});
+var body={jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'post_task',arguments:{
+repo:v('sg-repo'),title:v('sg-title'),description:v('sg-desc'),acceptance_tests:tests,
+bounty_sats:parseInt(v('sg-bounty')||'0',10),deadline_at:parseInt(v('sg-deadline')||'0',10)||0,
+poster:v('sg-poster')||'anon',idempotency_key:(crypto.randomUUID?crypto.randomUUID():'post-'+Date.now())}}};
+try{
+var r=await fetch('mcp',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+document.getElementById('sg-bearer').value},body:JSON.stringify(body)});
+var j=await r.json();
+var t=j&&j.result&&j.result.content&&j.result.content[0]&&j.result.content[0].text;
+var p=t?JSON.parse(t):{ok:false,error:(j&&j.error&&j.error.message)||('HTTP '+r.status)};
+if(p.ok){out.className='sg-out sg-ok';out.textContent='posted: '+p.task_id+' — reload to see it.';}
+else{out.className='sg-out sg-err';out.textContent='refused: '+(p.error||'unknown');}
+}catch(e){out.className='sg-out sg-err';out.textContent='network error: '+e;}
+});})();
+</script>
 """
 
 
@@ -129,6 +184,7 @@ async def render(store):
 </header>
 <h2>🏆 Leaderboard</h2>
 {_leaderboard_table(lb)}
+{_POST_FORM}
 <h2>📋 Tasks</h2>
 {''.join(cards) if cards else '<div class="card empty">No tasks posted yet.</div>'}
 <footer>read-only · settlement is dry-run until the send primitive exists · never shows full repo tokens</footer>

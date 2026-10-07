@@ -13,6 +13,9 @@ Checks:
   B3. Read-only: D1 row counts (claims, ledger) identical before/after.
   B4. POST /board -> 404 (no action surface); empty DB renders the
       empty state with 200.
+  B5. Operator post form: present with bearer password field (no value),
+      posts to the relative MCP endpoint client-side; page GETs still
+      perform zero writes.
 """
 import asyncio
 import json
@@ -244,6 +247,17 @@ async def main():
     resp4 = await app2.fetch(req)
     check("B4: empty DB -> 200", resp4.status == 200)
     check("B4: empty state rendered", "No tasks posted yet" in resp4.body)
+
+    # -- B5: operator post form ----------------------------------------
+    check("B5: post form present", 'id="sg-post-form"' in body)
+    check("B5: bearer is a password field",
+          'id="sg-bearer" type="password"' in body)
+    check("B5: no bearer value embedded",
+          'value="' not in body.split(
+              'id="sg-post-form"')[1].split("</form>")[0])
+    check("B5: posts client-side to relative mcp",
+          "fetch('mcp'" in body)
+    check("B5: no full token in form", full_token not in body)
 
     print(f"\n== {PASSED} passed, 0 failed ==")
 

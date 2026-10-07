@@ -133,8 +133,14 @@ fork, token last4), forks + verifications (verdict, stake, repro),
 and the merge record (decision, gate mode preview/diff, findings by
 severity, the "why it won" rationale). Leaderboard table on top. Dark,
 camera-readable styling; plain HTML string, zero dependencies.
-Covered by `worker/test/test_board.py` (16 checks: markers, redaction,
-read-only proof, empty state).
+Covered by `worker/test/test_board.py` (21 checks: markers, redaction,
+read-only proof, empty state, operator post form). The board also
+carries an operator "Post a task" form (collapsible, above the task
+list): repo, title, description, acceptance tests (one per line),
+bounty, deadline, poster + bearer password field. Pure client-side
+JS posts `post_task` to the relative MCP endpoint with a fresh
+idempotency key per submit; the bearer lives only in that browser
+tab's memory. GET /board still performs zero writes.
 
 ## workerd quirks (same family as the TestSwarm/PreFlight builds)
 

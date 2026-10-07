@@ -179,6 +179,24 @@ TOOLS = [
                                     "maximum": 100, "default": 25}},
         },
     },
+    {
+        # TEMPORARY operator tool (pilot incident): re-enqueue lifecycle
+        # messages the queue consumer dropped before the body-coercion
+        # fix. Removed before the contest submission.
+        "name": "redrive_task",
+        "description": (
+            "TEMPORARY operator recovery: re-enqueue dropped verify/merge"
+            " queue messages for a task (submitted forks -> verify,"
+            " pass-verified forks with no merge -> merge). " + DRY_RUN),
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id", "idempotency_key"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
 ]
 _TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
@@ -283,6 +301,8 @@ async def _call_tool(store, deps, name, args):
         return await _get_merge_report(store, args)
     if name == "get_leaderboard":
         return await _get_leaderboard(store, args)
+    if name == "redrive_task":
+        return await _redrive_task(store, deps, args)
     raise GitError(f"unknown tool: {name}")  # unreachable
 
 
@@ -438,3 +458,34 @@ async def _get_leaderboard(store, args):
         limit = 25
     limit = max(1, min(100, limit))
     return {"ok": True, "leaderboard": await store.leaderboard(limit)}
+
+
+async def _redrive_task(store, deps, args):
+    """TEMPORARY (pilot incident): re-enqueue dropped lifecycle messages."""
+    key = _need_key(args)
+    hit = _idem_hit(await store.idem_get(key), "redrive_task")
+    if hit:
+        return hit
+    task_id = args.get("task_id", "")
+    task = await store.get_task(task_id)
+    if not task:
+        raise GitError("refused: task not found")
+    if task.get("status") == "settled":
+        raise GitError("refused: task already settled")
+    sent = []
+    merges = await store.merges_for_task(task_id)
+    for fork in await store.forks_for_task(task_id):
+        verifs = await store.verifications_for_fork(fork["fork_id"])
+        passed = [v for v in verifs if v.get("verdict") == "pass"]
+        if passed and not merges:
+            await deps["enqueue"]({"kind": "merge", "task_id": task_id,
+                                  "fork_id": fork["fork_id"]})
+            sent.append(("merge", fork["fork_id"]))
+        elif fork.get("status") == "submitted":
+            await deps["enqueue"]({"kind": "verify", "task_id": task_id,
+                                  "fork_id": fork["fork_id"]})
+            sent.append(("verify", fork["fork_id"]))
+    result = {"ok": True, "task_id": task_id, "requeued": sent,
+              "idempotent": False}
+    await store.idem_put(key, "redrive_task", result)
+    return result

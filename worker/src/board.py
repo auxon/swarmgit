@@ -159,8 +159,10 @@ var who=document.getElementById('sg-who');
 // clears when the tab closes; never touches disk, cookies, or server).
 try{var s=sessionStorage.getItem('sg_bearer')||'';if(s){bEl.value=s;bEl.placeholder='saved for this tab session';}}catch(e){}
 bEl.addEventListener('input',function(){try{sessionStorage.setItem('sg_bearer',bEl.value);}catch(e){}});
-// Signed-in state: the session cookie (HttpOnly) rides along automatically.
-fetch('auth/me',{credentials:'same-origin'}).then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});}).then(function(p){
+// Signed-in state: the session cookie (HttpOnly) rides along automatically;
+// if the browser dropped the cookie, fall back to the sessionStorage copy.
+function meHeaders(){var h={};try{var s=sessionStorage.getItem('sg_session')||'';if(s)h['Authorization']='Bearer '+s;}catch(e){}return h;}
+fetch('auth/me',{credentials:'same-origin',headers:meHeaders()}).then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});}).then(function(p){
 if(p.s===200&&p.j.signedIn){who.textContent='signed in as '+(p.j.name||p.j.email||'Google user');document.getElementById('sg-bearer-row').style.display='none';}
 }).catch(function(){});
 // Google button (rendered once GIS loads and the client id is known).
@@ -171,7 +173,7 @@ google.accounts.id.renderButton(document.getElementById('sg-gbtn'),{theme:'fille
 }
 function onGoogle(resp){
 fetch('auth/google',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_token:resp.credential})}).then(function(r){return r.json();}).then(function(j){
-if(j.ok){location.reload();}else{out.className='sg-out sg-err';out.textContent='sign-in refused: '+(j.error||'unknown');}
+if(j.ok){try{if(j.session)sessionStorage.setItem('sg_session',j.session);}catch(e){}location.reload();}else{out.className='sg-out sg-err';out.textContent='sign-in refused: '+(j.error||'unknown');}
 }).catch(function(e){out.className='sg-out sg-err';out.textContent='sign-in error: '+e;});
 }
 fetch('auth/config',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(c){
@@ -187,7 +189,9 @@ bounty_sats:parseInt(v('sg-bounty')||'0',10),deadline_at:parseInt(v('sg-deadline
 poster:v('sg-poster')||'anon',idempotency_key:(crypto.randomUUID?crypto.randomUUID():'post-'+Date.now())}}};
 try{
 var hdrs={'Content-Type':'application/json'};
+var sess='';try{sess=sessionStorage.getItem('sg_session')||'';}catch(e){}
 if(bEl.value)hdrs['Authorization']='Bearer '+bEl.value;
+else if(sess)hdrs['Authorization']='Bearer '+sess;
 var r=await fetch('mcp',{method:'POST',credentials:'same-origin',headers:hdrs,body:JSON.stringify(body)});
 var j=await r.json();
 var t=j&&j.result&&j.result.content&&j.result.content[0]&&j.result.content[0].text;

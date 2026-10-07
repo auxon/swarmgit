@@ -147,6 +147,17 @@ class Default(WorkerEntrypoint):
             sess = await auth_mod.get_session(
                 store, self._session_id(request))
             if not sess:
+                # Fallback transport: session id as Bearer credential.
+                try:
+                    auth = request.headers.get("Authorization") or ""
+                except Exception:
+                    auth = ""
+                token = ""
+                if str(auth).startswith("Bearer "):
+                    token = str(auth)[len("Bearer "):].strip()
+                if token:
+                    sess = await auth_mod.get_session(store, token)
+            if not sess:
                 return Response(json.dumps({"signedIn": False}),
                                 status=401, headers=JSON)
             return Response(json.dumps(
@@ -183,7 +194,12 @@ class Default(WorkerEntrypoint):
             sid = await auth_mod.mint_session(store, ident)
             return Response(json.dumps(
                 {"ok": True, "email": ident["email"],
-                 "name": ident["name"]}), headers={
+                 "name": ident["name"],
+                 # Dual transport: HttpOnly cookie (primary) + body
+                 # session id (fallback — some browsers/containers drop
+                 # cross-context Set-Cookie; the page keeps this in
+                 # sessionStorage and sends it as a Bearer credential).
+                 "session": sid}), headers={
                 **JSON,
                 "Set-Cookie": auth_mod.session_cookie_header(sid)})
 
@@ -222,18 +238,26 @@ class Default(WorkerEntrypoint):
         return cookies.get(auth_mod.SESSION_COOKIE, "")
 
     async def _authed(self, request):
-        """Bearer OR a valid Google session cookie. Bearer first (no
-        DB); session second (one indexed lookup). Fail closed."""
+        """Operator bearer, Google session cookie, or Google session id
+        as a Bearer credential (page fallback transport). Bearer first
+        (no DB); session second (one indexed lookup). Fail closed."""
         try:
             headers = request.headers
             auth = headers.get("Authorization") or ""
         except Exception:
             return False
         expected = getattr(self.env, "SWARMSGIT_BEARER", "") or ""
-        if expected and str(auth) == f"Bearer {expected}":
+        token = ""
+        if str(auth).startswith("Bearer "):
+            token = str(auth)[len("Bearer "):].strip()
+        if expected and token == expected:
             return True
         try:
             store = await self._db()
+            if token:
+                sess = await auth_mod.get_session(store, token)
+                if sess:
+                    return True
             sess = await auth_mod.get_session(
                 store, self._session_id(request))
         except Exception:

@@ -223,6 +223,9 @@ async def test_auth_routes():
     assert "Set-Cookie" in r.headers, r.headers
     assert "sg_session=" in r.headers["Set-Cookie"], r.headers
     assert "HttpOnly" in r.headers["Set-Cookie"]
+    login = json.loads(r.body)
+    assert login["ok"] is True and login.get("session"), login
+    sid = login["session"]
     cookie = r.headers["Set-Cookie"].split(";")[0]
 
     # me with cookie
@@ -243,6 +246,18 @@ async def test_auth_routes():
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
     assert r.status == 200, r.body
     assert "redrive_task" in r.body or "post_task" in r.body, r.body[:200]
+
+    # MCP via session id as Bearer (fallback transport), no cookie
+    r = await app.fetch(FakeRequest(
+        "POST", "https://x/mcp", {"Authorization": "Bearer " + sid,
+                                  "Content-Type": "application/json"},
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+    assert r.status == 200, r.body
+
+    # /auth/me via session id as Bearer (fallback transport)
+    r = await app.fetch(FakeRequest(
+        "GET", "https://x/auth/me", {"Authorization": "Bearer " + sid}))
+    assert r.status == 200, r.body
 
     # MCP with neither
     r = await app.fetch(FakeRequest(

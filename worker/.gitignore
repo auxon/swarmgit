@@ -1,1 +1,3 @@
 .dev.vars
+__pycache__/
+*.pyc

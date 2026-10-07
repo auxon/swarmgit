@@ -35,7 +35,7 @@ workers_dev = true
 # Public OAuth client id for the board's Google button (not a secret;
 # safe to ship). Empty until Richard creates the console client.
 [vars]
-GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_ID = "589184184131-nde7o3bidmnnema7ksll8hsov79u7h4e.apps.googleusercontent.com"
 
 # Zone routes (same pattern as trust + agentpay: path routes only, never
 # the apex). entry.py strips the /swarmgit mount prefix.

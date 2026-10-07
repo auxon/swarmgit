@@ -130,10 +130,10 @@ a{color:#6aa8ff}
 """
 
 _POST_FORM = """
-<details class="task"><summary><span class="task-title">➕ Post a task</span><span class="task-meta">operator · bearer stays in this browser tab only</span></summary>
+<details class="task"><summary><span class="task-title">➕ Post a task</span><span class="task-meta">operator · bearer asked once per browser, kept in session only</span></summary>
 <div class="task-body"><form id="sg-post-form" class="sg-form" autocomplete="off">
-<label>Bearer token (operator secret — typed, never stored)</label>
-<input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER">
+<label>Bearer token (operator secret — asked once, kept in this tab session only, never stored on disk)</label>
+<input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER once">
 <div class="row"><div><label>Repo (new Artifacts repo name)</label><input id="sg-repo" required maxlength="80"></div>
 <div><label>Bounty (sats, integer)</label><input id="sg-bounty" required inputmode="numeric" pattern="[0-9]+" placeholder="1000"></div></div>
 <label>Title</label><input id="sg-title" required maxlength="140">
@@ -148,6 +148,11 @@ _POST_FORM = """
 (function(){
 var f=document.getElementById('sg-post-form');if(!f)return;
 var out=document.getElementById('sg-out');
+var bEl=document.getElementById('sg-bearer');
+// Remember the bearer for this tab session only (sessionStorage clears
+// when the tab closes; never touches disk, cookies, or the server).
+try{var s=sessionStorage.getItem('sg_bearer')||'';if(s){bEl.value=s;bEl.placeholder='saved for this tab session';}}catch(e){}
+bEl.addEventListener('input',function(){try{sessionStorage.setItem('sg_bearer',bEl.value);}catch(e){}});
 f.addEventListener('submit',async function(ev){
 ev.preventDefault();out.className='sg-out';out.textContent='posting…';
 function v(id){return (document.getElementById(id).value||'').trim();}

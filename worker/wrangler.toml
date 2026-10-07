@@ -28,6 +28,17 @@ main = "src/entry.py"
 compatibility_date = "2026-10-05"
 compatibility_flags = ["python_workers", "disable_python_external_sdk"]
 
+# Keep the workers.dev endpoint alongside the zone routes (used by
+# automation + the contest run instructions).
+workers_dev = true
+
+# Zone routes (same pattern as trust + agentpay: path routes only, never
+# the apex). entry.py strips the /swarmgit mount prefix.
+routes = [
+  { pattern = "entangleit.com/swarmgit", zone_name = "entangleit.com" },
+  { pattern = "entangleit.com/swarmgit/*", zone_name = "entangleit.com" },
+]
+
 # D1: board state (tasks, claims, forks, verifications, merges,
 # escrow_ledger, reputation, why_entries, idempotency, rate limits).
 [[d1_databases]]

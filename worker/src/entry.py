@@ -26,12 +26,53 @@ import board as board_mod  # noqa: E402
 
 JSON = {"Content-Type": "application/json"}
 
+# Mount prefix for the zone route (entangleit.com/swarmgit/*).
+# Stripped so routes read the same on workers.dev and the zone —
+# same idiom as the trust worker's MOUNT/routePath.
+MOUNT = "/swarmgit"
+
+
+def _route_path(pathname):
+    if pathname == MOUNT or pathname.startswith(MOUNT + "/"):
+        return pathname[len(MOUNT):] or "/"
+    return pathname
+
 _SCHEMA_READY = False
 
 
 def _to_py(v):
     to_py = getattr(v, "to_py", None)
     return to_py() if callable(to_py) else v
+
+
+def _queue_body(raw):
+    """Coerce a queue message body to a dict.
+
+    The producer sends Python dicts, but the runtime may deliver the
+    body as a JSON string, bytes, or a JsProxy — all of which fail the
+    isinstance(dict) check and were silently acked-and-dropped (killed
+    the pilot's verify+merge flow: 4 messages, zero effects). Parse
+    defensively; return None when the body is not a lifecycle message.
+    """
+    body = _to_py(raw)
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = bytes(body).decode("utf-8")
+        except Exception:
+            return None
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception:
+            return None
+    # JsProxy of a JS object exposes no .to_py in some runtimes but
+    # supports keys(); last resort before giving up.
+    if not isinstance(body, dict) and hasattr(body, "keys"):
+        try:
+            body = {k: _queue_body(v) for k, v in body.items()}
+        except Exception:
+            return None
+    return body if isinstance(body, dict) else None
 
 
 def _path(url):
@@ -67,6 +108,7 @@ class Default(WorkerEntrypoint):
     async def _fetch_inner(self, request):
         path = _path(getattr(request, "url", "/"))
         method = (getattr(request, "method", "GET") or "GET").upper()
+        path = _route_path(path)
 
         if path == "/" and method == "GET":
             return Response(json.dumps({
@@ -139,16 +181,25 @@ class Default(WorkerEntrypoint):
 
     # -- queue (task-lifecycle consumer) -----------------------------
     # Note: the runtime invokes this as queue(batch, env, ctx).
+    # LESSON (pilot incident): the `env` parameter does NOT carry the
+    # ARTIFACTS binding in queue context (from_env raised "not
+    # configured" and every message crashed before processing). Use
+    # self.env like the fetch path, and degrade artifacts to None —
+    # the consumer only needs it for future diff computation.
     async def queue(self, batch, env, ctx):
         store = await self._db()
+        try:
+            artifacts = artifacts_mod.from_env(self.env)
+        except Exception:
+            artifacts = None
         deps = {
             "enqueue": self._enqueue,
             "http": self._http,
-            "artifacts": artifacts_mod.from_env(env),
+            "artifacts": artifacts,
             "sender": DryRunSender(),
         }
         for message in batch.messages:
-            body = _to_py(message.body)
+            body = _queue_body(message.body)
             if isinstance(body, dict):
                 # process_message never raises, but ack defensively
                 try:

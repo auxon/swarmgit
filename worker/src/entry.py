@@ -129,7 +129,12 @@ class Default(WorkerEntrypoint):
             # Never 502/504 — 503 on unexpected failure.
             try:
                 store = await self._db()
-                page = await board_mod.render(store)
+                try:
+                    pay = (getattr(self.env, "SWARMSGIT_PAY_ADDRESS", "")
+                           or "").strip()
+                except Exception:
+                    pay = ""
+                page = await board_mod.render(store, pay_address=pay)
             except Exception:
                 return Response("board unavailable", status=503,
                                 headers={"Content-Type": "text/plain"})

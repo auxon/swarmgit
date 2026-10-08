@@ -18,6 +18,8 @@ writes; POST /board is still 404.
 import html
 import time
 
+import qrcodegen
+
 
 def _e(v):
     return html.escape("" if v is None else str(v), quote=True)
@@ -127,6 +129,9 @@ a{color:#6aa8ff}
 .sg-out{margin-top:12px;font-size:13.5px}
 .sg-ok{color:#4ade80}
 .sg-err{color:#ff6b6b}
+.pay{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.pay svg{background:#fff;border-radius:8px;padding:8px}
+.pay .addr{font-size:15px;word-break:break-all}
 """
 
 _POST_FORM = """
@@ -204,12 +209,161 @@ else{out.className='sg-out sg-err';out.textContent='refused: '+(p.error||'unknow
 """
 
 
-async def render(store):
+def _qr_svg(text, scale=4):
+    """Public-domain Nayuki encoder. Quiet zone included. Empty on failure."""
+    if not text:
+        return ""
+    try:
+        qr = qrcodegen.QrCode.encode_text(
+            text, qrcodegen.QrCode.Ecc.MEDIUM)
+    except Exception:
+        return ""
+    n = qr.get_size()
+    dim = (n + 2) * scale
+    rects = []
+    for y in range(n):
+        for x in range(n):
+            if qr.get_module(x, y):
+                rects.append(
+                    '<rect x="%d" y="%d" width="%d" height="%d"/>'
+                    % ((x + 1) * scale, (y + 1) * scale, scale, scale))
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
+        'viewBox="0 0 %d %d" role="img" aria-label="payment QR">'
+        '<rect width="100%%" height="100%%" fill="#fff"/>'
+        '<g fill="#111">%s</g></svg>' % (dim, dim, dim, dim, "".join(rects)))
+
+
+def _bip21(address, sats):
+    try:
+        sats = int(sats or 0)
+    except (TypeError, ValueError):
+        sats = 0
+    if sats <= 0:
+        return "bitcoin:%s?sv" % address
+    return "bitcoin:%s?sv&amount=%.8f" % (address, sats / 1e8)
+
+
+def _pay_panel(address):
+    address = (address or "").strip()
+    if not address:
+        return (
+            '<div class="card pay"><div>'
+            '<h2 style="margin-top:0">Pay a bounty</h2>'
+            '<p class="task-meta">No receive address configured. '
+            'Set <span class="mono">SWARMSGIT_PAY_ADDRESS</span> '
+            'in wrangler.toml and redeploy. Settlement stays dry-run '
+            'until the send primitive exists; this panel is the '
+            'human payment rail.</p></div></div>')
+    uri = _bip21(address, 0)
+    return (
+        '<div class="card pay">%s<div>'
+        '<h2 style="margin-top:0">Pay a bounty</h2>'
+        '<p class="task-meta">Scan to pay SwarmGit. Put the task bounty '
+        'in the wallet. Ledger settlement is still dry-run.</p>'
+        '<p class="mono addr">%s</p>'
+        '<p class="mono">%s</p></div></div>' % ( _qr_svg(uri), _e(address), _e(uri)))
+
+
+_CLOSE_JS = r"""
+<script>
+(function(){var f=document.getElementById('sg-close-form');if(!f)return;
+var out=document.getElementById('sg-close-out');
+f.addEventListener('submit',async function(ev){
+ev.preventDefault();out.className='sg-out';out.textContent='closing...';
+function v(id){return (document.getElementById(id).value||'').trim();}
+var body={jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'close_dispute',arguments:{
+dispute_id:v('sg-dispute'),ruling:v('sg-ruling'),operator:v('sg-operator')||'operator',
+note:v('sg-note'),idempotency_key:(crypto.randomUUID?crypto.randomUUID():'close-'+Date.now())}}};
+try{
+var hdrs={'Content-Type':'application/json'};
+var b='';try{b=sessionStorage.getItem('sg_bearer')||'';}catch(e){}
+var sess='';try{sess=sessionStorage.getItem('sg_session')||'';}catch(e){}
+if(b)hdrs['Authorization']='Bearer '+b;else if(sess)hdrs['Authorization']='Bearer '+sess;
+var r=await fetch('mcp',{method:'POST',credentials:'same-origin',headers:hdrs,body:JSON.stringify(body)});
+var j=await r.json();
+var t=j&&j.result&&j.result.content&&j.result.content[0]&&j.result.content[0].text;
+var p=t?JSON.parse(t):{ok:false,error:(j&&j.error&&j.error.message)||('HTTP '+r.status)};
+if(p.ok){out.className='sg-out sg-ok';out.textContent='closed: '+p.ruling+(p.slashed_sats?(' / slashed '+p.slashed_sats+' sats'):'')+' - reload.';}
+else{out.className='sg-out sg-err';out.textContent='refused: '+(p.error||'unknown');}
+}catch(e){out.className='sg-out sg-err';out.textContent='network error: '+e;}
+});})();
+</script>
+"""
+
+
+def _close_form(deferred):
+    head = (
+        '<details class="task" id="sg-close"><summary>'
+        '<span class="task-title">Close a deferred dispute</span>'
+        '<span class="task-meta">human ruling - a bad dispute slashes the disputer</span>'
+        '</summary><div class="task-body">')
+    if not deferred:
+        body = '<p class="empty">No deferred disputes. Clef still rules the confident ones.</p>'
+    else:
+        opts = "".join(
+            '<option value="%s">%s / %s / contested %s by %s</option>' % (
+                _e(d.get("dispute_id")), _e(d.get("dispute_id")),
+                _e(_truncate(d.get("title"), 40)),
+                _e(d.get("contested")), _e(d.get("disputer")))
+            for d in deferred)
+        body = (
+            '<form id="sg-close-form" class="sg-form" autocomplete="off">'
+            '<label>Deferred dispute</label>'
+            '<select id="sg-dispute" required style="width:100%;background:#0b0e14;'
+            'border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px">'
+            + opts + '</select>'
+            '<div class="row"><div><label>Ruling</label>'
+            '<select id="sg-ruling" required style="width:100%;background:#0b0e14;'
+            'border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px">'
+            '<option value="uphold">uphold - verdict stands, slash disputer</option>'
+            '<option value="overturn">overturn - flip the verdict</option>'
+            '</select></div>'
+            '<div><label>Operator</label>'
+            '<input id="sg-operator" maxlength="40" placeholder="richard"></div></div>'
+            '<label>Note</label>'
+            '<textarea id="sg-note" maxlength="500" placeholder="why this ruling"></textarea>'
+            '<button type="submit">Close dispute</button>'
+            '<div id="sg-close-out" class="sg-out" aria-live="polite"></div>'
+            '</form>' + _CLOSE_JS)
+    return head + body + "</div></details>\n"
+
+
+def _disputes_section(disputes):
+    if not disputes:
+        return '<div class="empty">No disputes on this task.</div>'
+    rows = []
+    for d in disputes:
+        rows.append(
+            '<tr><td class="mono">%s</td><td><strong>%s</strong></td>'
+            '<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+                _e(d.get("dispute_id")), _e(d.get("disputer")),
+                _e(d.get("contested")), _state_badge(d.get("status")),
+                _e(d.get("ruling") or "-"),
+                _e(_truncate(d.get("grounds"), 80))))
+    return (
+        '<table><tr><th>id</th><th>disputer</th><th>contested</th>'
+        '<th>status</th><th>ruling</th><th>grounds</th></tr>'
+        + "".join(rows) + "</table>"
+        '<p class="task-meta">An upheld dispute is a bad dispute: '
+        'the disputer is slashed (dry-run ledger + false report).</p>')
+
+async def render(store, pay_address=""):
     """Build the full board page. Read-only: store reads only."""
     tasks = await store.list_tasks()
     cards = []
+    deferred = []
     for t in tasks:
         cards.append(await _task_card(store, t))
+        try:
+            disputes = await store.disputes_for_task(t.get("task_id"))
+        except Exception:
+            disputes = []
+        for d in disputes:
+            if d.get("status") == "deferred":
+                d = dict(d)
+                d["title"] = t.get("title")
+                deferred.append(d)
     lb = await store.leaderboard(25)
     now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
     body = f"""
@@ -219,10 +373,12 @@ async def render(store):
 </header>
 <h2>🏆 Leaderboard</h2>
 {_leaderboard_table(lb)}
+{_pay_panel(pay_address)}
 {_POST_FORM}
+{_close_form(deferred)}
 <h2>📋 Tasks</h2>
 {''.join(cards) if cards else '<div class="card empty">No tasks posted yet.</div>'}
-<footer>read-only · settlement is dry-run until the send primitive exists · never shows full repo tokens</footer>
+<footer>settlement is dry-run until the send primitive exists · pay the address above · never shows full repo tokens</footer>
 """
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -273,6 +429,7 @@ async def _task_card(store, t):
             f"{_acceptance_tests(t)}"
             f"<h3>Claims ({len(claims)})</h3>{_claims_table(claims, forks_by_claim)}"
             f"<h3>Forks &amp; verification</h3>{_forks_section(forks)}"
+            f"<h3>Disputes</h3>{_disputes_section(await store.disputes_for_task(task_id))}"
             f"<h3>Merge</h3>{_merges_section(merges)}"
             f"</div></details>")
 

@@ -133,9 +133,10 @@ the bounty.
   Overturn a fail: fork returns to `verifying` and the merge gate is
   requeued. Uphold a pass: fork stays `verifying`. Overturn a pass:
   fork goes `rejected`, task returns to `open`.
-- Still open: no operator tool to close a deferred dispute;
-  `reputation.false_reports` is unused; a dispute does not slash or
-  pay a stake; no release/refund/split.
+- Bad dispute (uphold): disputer slashed, dry-run, floor 100 sats or
+  10% of bounty, `false_reports` incremented. Human close of a
+  deferred dispute is `close_dispute` and the board form. Still open:
+  live slash, release/refund/split.
 
 New D1 tables (extend the forked `schema.sql`): `tasks`, `claims`,
 `forks`, `verifications`, `merges`, `disputes`, `escrow_ledger`
@@ -228,10 +229,9 @@ Run instructions, MIT LICENSE, repo public, video uploaded,
 submission form sent. Nothing left to the last hour.
 
 **Deliberately deferred:** real sats settlement (needs his send
-primitive); an operator tool to close a deferred dispute (the Clef
-engine itself is built — see §3); stake slash and `false_reports`;
-multi-repo organizations; a web dashboard (the MCP surface + board is
-the demo).
+primitive); a live (non-dry-run) slash; multi-repo organizations.
+The operator close and the dry-run slash are built — see §3. The
+board is the demo UI, including the pay address and QR.
 
 ---
 

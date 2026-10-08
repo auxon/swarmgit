@@ -36,6 +36,9 @@ workers_dev = true
 # safe to ship). Empty until Richard creates the console client.
 [vars]
 GOOGLE_CLIENT_ID = "589184184131-nde7o3bidmnnema7ksll8hsov79u7h4e.apps.googleusercontent.com"
+# BSV receive address shown on /board with a QR. Not a secret.
+# Empty hides the QR and says so. Set a real address before the demo.
+SWARMSGIT_PAY_ADDRESS = ""
 
 # Zone routes (same pattern as trust + agentpay: path routes only, never
 # the apex). entry.py strips the /swarmgit mount prefix.

@@ -5,7 +5,7 @@ Adapted from the TestSwarm scaffold's swarmlib.py economics
 per-task escrow, reputation) to coding tasks on Artifacts forks:
 
   open → claimed → working → submitted → verifying → merging → settled
-     ↘ expired (bounty returned)      ↘ disputed (not built: see README)
+     ↘ expired (bounty returned)      ↘ disputed → Clef | human close
 
 Settlement is DRY-RUN ONLY until Richard's POST /agent/send primitive
 exists. Every ledger event carries settlement="dry_run"; the Sender
@@ -410,11 +410,27 @@ async def dispute_fork(store, fork_id, disputer, grounds="", repro=""):
             "fork_id": fork_id, "dispute_id": dispute["dispute_id"]}
 
 
+# A bad dispute is an uphold: the contested verdict stands, so the
+# disputer was wrong. Slash is dry-run ledger + reputation. Floor 100
+# sats, otherwise 10% of the task bounty.
+SLASH_SCORE = 5
+SLASH_SATS_FLOOR = 100
+
+
+def dispute_slash_sats(bounty):
+    try:
+        bounty = int(bounty or 0)
+    except (TypeError, ValueError):
+        bounty = 0
+    return max(SLASH_SATS_FLOOR, bounty // 10)
+
+
 async def apply_arbitration(store, dispute_id, ruling, confidence,
                             genuine=0.0, severity=0, deferred=False,
-                            note=""):
-    """Apply a Clef ruling (or record a deferral). uphold = contested
-    verdict stands; overturn = flipped. Returns the outcome record."""
+                            note="", actor="clef"):
+    """Apply a Clef or human ruling (or record a deferral). uphold =
+    contested verdict stands (bad dispute, disputer slashed); overturn
+    = flipped. Returns the outcome record."""
     dispute = await store.get_dispute(dispute_id)
     if not dispute:
         raise GitError("refused: dispute not found")
@@ -449,11 +465,48 @@ async def apply_arbitration(store, dispute_id, ruling, confidence,
     if task:
         task["status"] = new_task
         await store.put_task(task)
-    await store.ledger_add("dispute_resolved", dispute["task_id"], "clef",
+    await store.ledger_add("dispute_resolved", dispute["task_id"], actor,
                            0, {"dispute_id": dispute_id, "ruling": ruling,
                                "confidence": confidence, "genuine": genuine,
-                               "severity": severity,
+                               "severity": severity, "actor": actor,
                                "settlement": "dry_run"})
+    slashed = 0
+    if ruling == "uphold":
+        slashed = dispute_slash_sats(
+            (task or {}).get("bounty_sats", 0))
+        await store.ledger_add(
+            "dispute_slash", dispute["task_id"], dispute["disputer"],
+            slashed, {"dispute_id": dispute_id, "reason": "bad dispute",
+                      "ruling": ruling, "actor": actor,
+                      "settlement": "dry_run"})
+        await store.bump_reputation(
+            dispute["disputer"], score=-SLASH_SCORE, false_reports=1)
     return {"ok": True, "dispute_id": dispute_id, "ruling": ruling,
+            "fork_id": dispute["fork_id"], "task_id": dispute["task_id"],
             "fork_status": new_fork, "task_status": new_task,
-            "needs_merge": new_fork == "verifying"}
+            "needs_merge": new_fork == "verifying",
+            "slashed_sats": slashed, "bad_dispute": ruling == "uphold",
+            "actor": actor}
+
+
+async def close_deferred_dispute(store, dispute_id, ruling, operator,
+                                 note=""):
+    """Human close of a deferred dispute. Same uphold/overturn outcomes
+    as Clef, including the slash on a bad (upheld) dispute. Does not
+    touch an open dispute — that one is Clef's."""
+    operator = (operator or "").strip() or "operator"
+    dispute = await store.get_dispute(dispute_id)
+    if not dispute:
+        raise GitError("refused: dispute not found")
+    if dispute["status"] != "deferred":
+        raise GitError(
+            f"refused: dispute is {dispute['status']}, not deferred")
+    ruling = (ruling or "").strip()
+    if ruling not in ("uphold", "overturn"):
+        raise GitError("refused: ruling must be uphold or overturn")
+    dispute["status"] = "open"
+    await store.put_dispute(dispute)
+    return await apply_arbitration(
+        store, dispute_id, ruling, 1.0, deferred=False,
+        note=f"human:{operator}: {(note or '').strip()}",
+        actor=operator)

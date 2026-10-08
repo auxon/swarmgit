@@ -205,6 +205,30 @@ TOOLS = [
             },
         },
     },
+    {
+        # Human close of a Clef deferral. Same outcomes as a ruling,
+        # including the slash on a bad (upheld) dispute.
+        "name": "close_dispute",
+        "description": (
+            "Operator close of a deferred dispute. ruling is uphold"
+            " (contested verdict stands; disputer is slashed) or"
+            " overturn (verdict flipped). Open disputes are Clef's,"
+            " not this tool's. " + DRY_RUN +
+            "\nIdempotent: repeating with the same idempotency_key returns"
+            " the original close."),
+        "inputSchema": {
+            "type": "object",
+            "required": ["dispute_id", "ruling", "operator",
+                         "idempotency_key"],
+            "properties": {
+                "dispute_id": {"type": "string"},
+                "ruling": {"type": "string", "enum": ["uphold", "overturn"]},
+                "operator": {"type": "string"},
+                "note": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
 ]
 _TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
@@ -311,6 +335,8 @@ async def _call_tool(store, deps, name, args):
         return await _get_leaderboard(store, args)
     if name == "dispute_fork":
         return await _dispute_fork(store, deps, args)
+    if name == "close_dispute":
+        return await _close_dispute(store, deps, args)
     raise GitError(f"unknown tool: {name}")  # unreachable
 
 
@@ -488,4 +514,24 @@ async def _dispute_fork(store, deps, args):
               "fork_id": payload["fork_id"], "status": "disputed",
               "arbitrate_queued": True, "idempotent": False}
     await store.idem_put(key, "dispute_fork", result)
+    return result
+
+
+async def _close_dispute(store, deps, args):
+    key = _need_key(args)
+    hit = _idem_hit(await store.idem_get(key), "close_dispute")
+    if hit:
+        return hit
+    outcome = await gitlib.close_deferred_dispute(
+        store, args.get("dispute_id", ""), args.get("ruling", ""),
+        args.get("operator", ""), args.get("note", ""))
+    if outcome.get("needs_merge"):
+        await deps["enqueue"]({
+            "kind": "merge",
+            "task_id": outcome.get("task_id", ""),
+            "fork_id": outcome.get("fork_id", ""),
+        })
+    result = {"ok": True, "settlement": "dry_run", "idempotent": False,
+              **outcome}
+    await store.idem_put(key, "close_dispute", result)
     return result

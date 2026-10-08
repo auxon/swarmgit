@@ -34,6 +34,7 @@ class FakeStore:
         self.disputes = {}
         self.ledger = []
         self.merges = []
+        self.reputation = {}
 
     async def get_task(self, tid):
         t = self.tasks.get(tid)
@@ -89,6 +90,13 @@ class FakeStore:
 
     async def merges_for_task(self, tid):
         return [m for m in self.merges if m["task_id"] == tid]
+
+    async def bump_reputation(self, agent, **deltas):
+        cur = self.reputation.setdefault(
+            agent, {"score": 0, "false_reports": 0})
+        for k, v in deltas.items():
+            cur[k] = int(cur.get(k, 0)) + int(v)
+        return cur
 
 
 PASS_RULING = {
@@ -263,6 +271,43 @@ async def test_arbitrate_low_confidence_defers():
     assert not sent
 
 
+
+async def test_uphold_slashes_disputer():
+    s = setup_rejected()
+    p = await gitlib.dispute_fork(s, "f1", "worker2", "tests lie", "run X")
+    ai = FakeAI(PASS_RULING)
+    async def enq(m):
+        return None
+    deps = {"ai": ai, "enqueue": enq, "http": None, "sender": None,
+            "artifacts": None}
+    await consumer_mod.process_message(store=s, deps=deps, msg={
+        "kind": "arbitrate", "task_id": "t1", "fork_id": "f1",
+        "dispute_id": p["dispute_id"]})
+    assert any(x["kind"] == "dispute_slash" and x["agent"] == "worker2"
+               and x["sats"] >= 100 for x in s.ledger)
+    assert s.reputation["worker2"]["false_reports"] == 1
+    assert s.reputation["worker2"]["score"] < 0
+
+
+async def test_human_close_deferred_overturn():
+    s = setup_rejected()
+    p = await gitlib.dispute_fork(s, "f1", "worker2", "tests lie", "run X")
+    await gitlib.apply_arbitration(
+        s, p["dispute_id"], "", 0.4, deferred=True, note="low")
+    out = await gitlib.close_deferred_dispute(
+        s, p["dispute_id"], "overturn", "richard", "repro holds")
+    assert out["ruling"] == "overturn" and out["needs_merge"], out
+    assert out["slashed_sats"] == 0
+    assert s.forks["f1"]["status"] == "verifying"
+    try:
+        await gitlib.close_deferred_dispute(
+            s, p["dispute_id"], "uphold", "richard", "again")
+    except gitlib.GitError as e:
+        assert "not deferred" in str(e), e
+    else:
+        raise AssertionError("expected second close to refuse")
+
+
 async def main():
     tests = [
         ("decide uphold confident", test_decide_uphold_confident),
@@ -276,6 +321,8 @@ async def main():
         ("arbitrate uphold fail", test_arbitrate_uphold_fail_stays_rejected),
         ("arbitrate overturn requeues", test_arbitrate_overturn_fail_requeues_merge),
         ("arbitrate low conf defers", test_arbitrate_low_confidence_defers),
+        ("uphold slashes disputer", test_uphold_slashes_disputer),
+        ("human close deferred", test_human_close_deferred_overturn),
     ]
     passed = failed = 0
     for name, fn in tests:

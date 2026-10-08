@@ -112,9 +112,10 @@ default-allow, never default-block.
 | pass (fork was verifying) | fork stays verifying | fork rejected, task returns to open |
 
 No sats move. Ledger lines are `dispute_open`, `arbitration_deferred`,
-and `dispute_resolved`, all `settlement: "dry_run"`. There is no
-operator tool yet to close a deferred dispute, and
-`reputation.false_reports` is not incremented.
+and `dispute_resolved`, all `settlement: "dry_run"`. The board has a Close a deferred dispute form (Google session or
+bearer, same as post-task). Uphold slashes the disputer: dry-run
+ledger `dispute_slash` (10% of the bounty, floor 100 sats) and
+`false_reports` + 1. Overturn does not slash.
 
 ## Settlement — dry-run until the send primitive exists
 
@@ -178,7 +179,10 @@ list): repo, title, description, acceptance tests (one per line),
 bounty, deadline, poster + bearer password field. Pure client-side
 JS posts `post_task` to the relative MCP endpoint with a fresh
 idempotency key per submit; the bearer lives only in that browser
-tab's memory. GET /board still performs zero writes.
+tab's memory. GET /board still performs zero writes. The board also shows the
+BSV receive address from `SWARMSGIT_PAY_ADDRESS` and a QR of the
+`bitcoin:<address>?sv` URI. Empty address renders the unset state,
+not a fake address.
 
 ## workerd quirks (same family as the TestSwarm/PreFlight builds)
 
@@ -203,9 +207,9 @@ tab's memory. GET /board still performs zero writes.
 3. **Dispute arbitration shipped as a Clef ruling, not a review UI.**
    PLAN §5 deferred a reputation-weighted arbitration UI. The engine is
    built: `dispute_fork` writes `disputed`, the queue asks Clef, and
-   confidence below 0.70 defers. Still missing: an operator tool to
-   close a deferred dispute, stake slash / `false_reports`, and any
-   release/refund/split. See "Disputes" above.
+   confidence below 0.70 defers. The operator close is on the board. Still missing: a live slash
+   (ledger is dry-run) and any release/refund/split. See "Disputes"
+   above.
 
 ## Hard constraints — how they're enforced
 

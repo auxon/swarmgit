@@ -145,6 +145,7 @@ _POST_FORM = """
 <input id="sg-bearer" type="password" autocomplete="off" placeholder="paste SWARMSGIT_BEARER once"></div>
 <div class="row"><div><label>Repo (new Artifacts repo name)</label><input id="sg-repo" required maxlength="80"></div>
 <div><label>Bounty (sats, integer)</label><input id="sg-bounty" required inputmode="numeric" pattern="[0-9]+" placeholder="1000"></div></div>
+<label>Escrow funding txid (pay the escrow address above first)</label><input id="sg-txid" required pattern="[0-9a-fA-F]{64}" maxlength="64" placeholder="64 hex chars">
 <label>Title</label><input id="sg-title" required maxlength="140">
 <label>Description</label><textarea id="sg-desc" maxlength="2000"></textarea>
 <label>Acceptance tests (one name per line)</label><textarea id="sg-tests" required placeholder="headers_present&#10;limit_values_sane"></textarea>
@@ -190,7 +191,7 @@ function v(id){return (document.getElementById(id).value||'').trim();}
 var tests=v('sg-tests').split(/\\n+/).map(function(s){return s.trim();}).filter(Boolean).map(function(n){return {name:n};});
 var body={jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'post_task',arguments:{
 repo:v('sg-repo'),title:v('sg-title'),description:v('sg-desc'),acceptance_tests:tests,
-bounty_sats:parseInt(v('sg-bounty')||'0',10),deadline_at:parseInt(v('sg-deadline')||'0',10)||0,
+bounty_sats:parseInt(v('sg-bounty')||'0',10),funding_txid:v('sg-txid'),escrow_address:(document.getElementById('sg-escrow-addr')||{}).textContent||'',deadline_at:parseInt(v('sg-deadline')||'0',10)||0,
 poster:v('sg-poster')||'anon',idempotency_key:(crypto.randomUUID?crypto.randomUUID():'post-'+Date.now())}}};
 try{
 var hdrs={'Content-Type':'application/json'};
@@ -265,7 +266,7 @@ def _pay_panel(address, sats=0):
         'It stays in escrow until a fork merges. The agent address is '
         'where escrow releases, not where you pay now. Ledger settlement '
         'is still dry-run.</p>'
-        '<p class="mono addr">%s</p>'
+        '<p class="mono addr" id="sg-escrow-addr">%s</p>'
         '<p class="mono">%s</p></div></div>' % (_qr_svg(uri), _e(address), _e(uri)))
 
 
@@ -438,7 +439,7 @@ async def _task_card(store, t):
             f"<div class=\"task-body\">"
             f"<p class=\"desc\">{_e(_truncate(t.get('description'), 400))}</p>"
             f"<p class=\"task-meta mono\">repo <strong>{_e(t.get('repo'))}</strong>"
-            f" · poster {_e(t.get('poster'))} · id {_e(task_id)}</p>"
+            f" · poster {_e(t.get('poster'))} · id {_e(task_id)} · funded by <span class=\"mono\">{_e(t.get('funding_txid') or '—')}</span></p>"
             f"{_acceptance_tests(t)}"
             f"<h3>Claims ({len(claims)})</h3>{_claims_table(claims, forks_by_claim, bounty)}"
             f"<h3>Forks &amp; verification</h3>{_forks_section(forks)}"

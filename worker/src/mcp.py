@@ -41,19 +41,24 @@ TOOLS = [
             "Post a coding task with a sats bounty: Artifacts repo, title,"
             " description, acceptance_tests (each needs a name),"
             " bounty_sats, optional deadline_at (unix).\n"
-            "Bounty is escrowed on posting (ledger-only). " + DRY_RUN +
+            "Escrow must be funded first: pay SWARMSGIT_PAY_ADDRESS the"
+            " bounty, then pass that funding_txid. The txid is stored"
+            " on the task and cited on release. " + DRY_RUN +
             "\nIdempotent: repeating with the same idempotency_key returns"
             " the original task, never a duplicate."),
         "inputSchema": {
             "type": "object",
             "required": ["repo", "title", "acceptance_tests",
-                         "bounty_sats", "idempotency_key"],
+                         "bounty_sats", "funding_txid", "idempotency_key"],
             "properties": {
                 "repo": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string", "default": ""},
                 "acceptance_tests": {"type": "array"},
-                "bounty_sats": {"type": "integer", "minimum": 0},
+                "bounty_sats": {"type": "integer", "minimum": 1},
+                "funding_txid": {"type": "string",
+                                 "description": "Txid of the bounty payment to SWARMSGIT_PAY_ADDRESS."},
+                "escrow_address": {"type": "string"},
                 "deadline_at": {"type": "integer", "minimum": 0,
                                 "default": 0},
                 "poster": {"type": "string", "default": "anon"},
@@ -359,6 +364,8 @@ async def _post_task(store, args):
         "bounty_sats": args.get("bounty_sats"),
         "deadline_at": args.get("deadline_at", 0),
         "poster": args.get("poster", "anon"),
+        "funding_txid": args.get("funding_txid", ""),
+        "escrow_address": args.get("escrow_address", ""),
     }
     task = await gitlib.post_task(store, spec)
     result = {"ok": True, "task_id": task["task_id"], "repo": task["repo"],
@@ -426,7 +433,9 @@ async def _get_task_status(store, args):
                      "repo": task.get("repo", ""),
                      "status": task.get("status"),
                      "bounty_sats": task.get("bounty_sats", 0),
-                     "poster": task.get("poster", "anon")},
+                     "poster": task.get("poster", "anon"),
+                     "funding_txid": task.get("funding_txid", ""),
+                     "escrow_address": task.get("escrow_address", "")},
             "claims": [{"id": c["id"], "agent": c["agent"],
                         "status": c["status"],
                         "pay_address": c.get("pay_address", "")}

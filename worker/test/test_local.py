@@ -259,14 +259,14 @@ async def main():
         "acceptance_tests": [{"name": "headers_present"},
                              {"name": "limit_values_sane"}],
         "bounty_sats": 10000, "poster": "maintainer",
-        "idempotency_key": "k-post-1"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-1"}))
     task_id = r["task_id"]
     check("post_task ok, status open", r["status"] == "open")
     check("post_task escrow dry-run", "dry_run" in r["escrow"])
     r2 = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Add rate-limit headers",
         "acceptance_tests": [{"name": "headers_present"}],
-        "bounty_sats": 10000, "idempotency_key": "k-post-1"}))
+        "bounty_sats": 10000, "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-1"}))
     check("post_task idempotent repost", r2.get("idempotent") is True
           and r2["task_id"] == task_id)
     e = tool_err_text(await call_tool(store, deps, "post_task", {
@@ -357,7 +357,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Leaky task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 5000,
-        "idempotency_key": "k-post-10"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-10"}))
     t2 = r["task_id"]
     c3 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t2, "agent": "agent_c",
@@ -390,7 +390,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Failing task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 3000,
-        "idempotency_key": "k-post-20"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-20"}))
     t3 = r["task_id"]
     c4 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t3, "agent": "agent_d",
@@ -419,7 +419,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Self task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 1000,
-        "idempotency_key": "k-post-30"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-30"}))
     t4 = r["task_id"]
     c5 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t4, "agent": "agent_e",

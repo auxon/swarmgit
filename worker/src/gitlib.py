@@ -29,6 +29,17 @@ def nid(prefix):
 _B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
 
+
+def validate_funding_txid(txid):
+    """BSV tx that funded escrow. 64 hex chars, no 0x prefix."""
+    txid = (txid or "").strip().lower()
+    if len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
+        raise GitError(
+            "refused: funding_txid is required — pay SWARMSGIT_PAY_ADDRESS"
+            " the bounty first, then post the 64-char txid")
+    return txid
+
+
 def validate_pay_address(addr):
     """BSV receive address. Legacy base58, starts with 1 or 3."""
     addr = (addr or "").strip()
@@ -72,6 +83,11 @@ async def post_task(store, spec, task_id=None):
     if not isinstance(bounty, int) or isinstance(bounty, bool) \
             or bounty < 0:
         raise GitError("refused: bounty_sats must be a non-negative int")
+    if bounty <= 0:
+        raise GitError("refused: bounty_sats must be funded — post a"
+                       " positive bounty after paying escrow")
+    funding_txid = validate_funding_txid(spec.get("funding_txid"))
+    escrow_address = (spec.get("escrow_address") or "").strip()
     task_id = task_id or nid("task_")
     task = {
         "task_id": task_id,
@@ -83,11 +99,15 @@ async def post_task(store, spec, task_id=None):
         "description": spec.get("description", ""),
         "acceptance_tests": tests,
         "deadline_at": int(spec.get("deadline_at", 0)),
+        "funding_txid": funding_txid,
+        "escrow_address": escrow_address,
         "created_at": int(time.time()),
     }
     await store.put_task(task)
     await store.ledger_add("escrow_lock", task_id, task["poster"], bounty,
-                           {"note": "bounty escrowed on posting",
+                           {"note": "bounty funded into escrow at post",
+                            "funding_txid": funding_txid,
+                            "escrow_address": escrow_address,
                             "settlement": "dry_run"})
     return task
 
@@ -333,6 +353,8 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
                     "txid": r.get("txid")})
     await store.ledger_add("payout", task_id, winner, worker_sats,
                            {"role": "winner", "pay_address": dest,
+                            "funding_txid": task.get("funding_txid", ""),
+                            "escrow_address": task.get("escrow_address", ""),
                             "settlement": "dry_run",
                             "txid": r.get("txid")})
     for v, sats in verifier_sats.items():
@@ -352,6 +374,7 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     await store.put_task(task)
     return {"ok": True, "task_id": task_id, "dry_run": True,
             "funds_moved": False, "bounty_sats": bounty,
+            "funding_txid": task.get("funding_txid", ""),
             "winner": winner, "payouts": payouts,
             "note": "DRY-RUN ONLY. Ledger entries above are local"
                     " accounting. Live sats move only via Richard's"

@@ -46,25 +46,25 @@ class DryRunSender(Sender):
                 "note": "dry-run: no funds moved"}
 
 
-class ChainSender(Sender):
-    """Broadcasts the release. Watches nothing itself — the caller has
-    already confirmed the funding tx. Moves sats only by broadcasting."""
 
-    def __init__(self, http, wif, escrow_address):
+class WalletDSender(Sender):
+    """Ask bsv-walletd to sign and broadcast the release.
+
+    The seed phrase stays in the daemon. This sender only sends
+    JSON-RPC `send` to SWARMSGIT_WALLETD_URL. No WIF crosses the worker.
+    """
+
+    def __init__(self, http, url):
         self.http = http
-        self.wif = wif
-        self.escrow_address = escrow_address
+        self.url = url.rstrip("/")
         self.intents = []
 
     async def send(self, dest, sats, memo, idempotency_key=""):
-        import chain
-        if not isinstance(sats, int) or isinstance(sats, bool) or sats < 0:
-            raise SendError("refused: sats must be a non-negative int")
-        utxos = await chain.unspent(self.http, self.escrow_address)
-        txhex, txid = chain.build_release(
-            self.wif, self.escrow_address, utxos, dest, sats)
-        seen = await chain.broadcast(self.http, txhex)
-        self.intents.append({"dest": dest, "sats": sats, "txid": seen,
+        import walletd
+        if not isinstance(sats, int) or isinstance(sats, bool) or sats <= 0:
+            raise SendError("refused: sats must be a positive int")
+        out = await walletd.send(self.http, self.url, dest, sats, memo or "swarmgit release")
+        self.intents.append({"dest": dest, "sats": sats, "txid": out.get("txid"),
                              "settlement": "live"})
-        return {"ok": True, "settlement": "live", "txid": seen or txid,
-                "note": memo or "release broadcast"}
+        return {"ok": True, "settlement": "live", "txid": out.get("txid"),
+                "fee": out.get("fee"), "note": "signed by bsv-walletd"}

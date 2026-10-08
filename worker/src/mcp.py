@@ -368,7 +368,11 @@ async def _post_task(store, deps, args):
         "escrow_address": args.get("escrow_address", ""),
     }
     import chain
+    import walletd
     escrow = (args.get("escrow_address") or "").strip()
+    url = (deps.get("walletd_url") or "").strip()
+    if not escrow and url:
+        escrow = await walletd.escrow_address(deps["http"], url)
     watched = await chain.confirm_funding(
         deps["http"], spec["funding_txid"], escrow, spec["bounty_sats"])
     spec["escrow_address"] = watched["escrow_address"]

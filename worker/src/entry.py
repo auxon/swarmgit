@@ -21,7 +21,7 @@ import mcp as mcp_mod  # noqa: E402
 from store import D1Store  # noqa: E402
 import consumer as consumer_mod  # noqa: E402
 import artifacts as artifacts_mod  # noqa: E402
-from sender import ChainSender, DryRunSender  # noqa: E402
+from sender import DryRunSender, WalletDSender  # noqa: E402
 import board as board_mod  # noqa: E402
 import auth as auth_mod  # noqa: E402
 
@@ -108,6 +108,7 @@ class Default(WorkerEntrypoint):
             "http": self._http,
             "artifacts": artifacts_mod.from_env(self.env),
             "sender": self._sender(),
+            "walletd_url": self._walletd_url(),
             "ai": ai,
         }
 
@@ -274,11 +275,13 @@ class Default(WorkerEntrypoint):
             return False
         return sess is not None
 
+    def _walletd_url(self):
+        return (getattr(self.env, "SWARMSGIT_WALLETD_URL", "") or "").strip()
+
     def _sender(self):
-        wif = (getattr(self.env, "SWARMSGIT_ESCROW_WIF", "") or "").strip()
-        addr = (getattr(self.env, "SWARMSGIT_PAY_ADDRESS", "") or "").strip()
-        if wif and addr:
-            return ChainSender(self._http, wif, addr)
+        url = self._walletd_url()
+        if url:
+            return WalletDSender(self._http, url)
         return DryRunSender()
 
     async def _enqueue(self, msg):
@@ -310,6 +313,7 @@ class Default(WorkerEntrypoint):
             "http": self._http,
             "artifacts": artifacts,
             "sender": self._sender(),
+            "walletd_url": self._walletd_url(),
             "ai": ai,
         }
         for message in batch.messages:

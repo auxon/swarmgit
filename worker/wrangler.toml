@@ -39,9 +39,10 @@ GOOGLE_CLIENT_ID = "589184184131-nde7o3bidmnnema7ksll8hsov79u7h4e.apps.googleuse
 # BSV receive address shown on /board with a QR. Not a secret.
 # Empty hides the QR and says so. Set a real address before the demo.
 SWARMSGIT_PAY_ADDRESS = ""
-# Escrow signing key. Secret, never committed:
-#   printf %s '<wif>' | wrangler secret put SWARMSGIT_ESCROW_WIF
-# Must match SWARMSGIT_PAY_ADDRESS. Absent = release stays dry-run.
+# bsv-walletd JSON-RPC. The phrase stays in the daemon. A Cloudflare
+# worker cannot see 127.0.0.1 — tunnel the daemon, or run wrangler dev
+# on the same machine. Absent = release stays dry-run.
+# SWARMSGIT_WALLETD_URL = "https://127.0.0.1:2121"
 
 # Zone routes (same pattern as trust + agentpay: path routes only, never
 # the apex). entry.py strips the /swarmgit mount prefix.

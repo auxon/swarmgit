@@ -108,8 +108,14 @@ async def _on_merge(store, deps, msg):
                                 "settlement": "dry_run"})
         return  # task is open again; bounty still available
 
-    # -- settle (dry-run) --------------------------------------------
+    # -- watch the funding tx again, then broadcast the release ------
     try:
+        import chain
+        task = await store.get_task(task_id)
+        if task and task.get("funding_txid"):
+            await chain.confirm_funding(
+                deps["http"], task["funding_txid"],
+                task.get("escrow_address") or "", task.get("bounty_sats") or 0)
         await gitlib.settle_task(store, deps["sender"], task_id)
     except Exception:
         # settlement must never lose the merge record; the task stays

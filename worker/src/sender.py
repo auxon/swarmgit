@@ -44,3 +44,27 @@ class DryRunSender(Sender):
         self.intents.append(intent)
         return {"ok": True, "settlement": "dry_run", "txid": None,
                 "note": "dry-run: no funds moved"}
+
+
+class ChainSender(Sender):
+    """Broadcasts the release. Watches nothing itself — the caller has
+    already confirmed the funding tx. Moves sats only by broadcasting."""
+
+    def __init__(self, http, wif, escrow_address):
+        self.http = http
+        self.wif = wif
+        self.escrow_address = escrow_address
+        self.intents = []
+
+    async def send(self, dest, sats, memo, idempotency_key=""):
+        import chain
+        if not isinstance(sats, int) or isinstance(sats, bool) or sats < 0:
+            raise SendError("refused: sats must be a non-negative int")
+        utxos = await chain.unspent(self.http, self.escrow_address)
+        txhex, txid = chain.build_release(
+            self.wif, self.escrow_address, utxos, dest, sats)
+        seen = await chain.broadcast(self.http, txhex)
+        self.intents.append({"dest": dest, "sats": sats, "txid": seen,
+                             "settlement": "live"})
+        return {"ok": True, "settlement": "live", "txid": seen or txid,
+                "note": memo or "release broadcast"}

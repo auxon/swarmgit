@@ -351,11 +351,12 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     payouts.append({"to": dest, "agent": winner, "sats": worker_sats,
                     "settlement": r.get("settlement", "dry_run"),
                     "txid": r.get("txid")})
+    settlement = r.get("settlement", "dry_run")
     await store.ledger_add("payout", task_id, winner, worker_sats,
                            {"role": "winner", "pay_address": dest,
                             "funding_txid": task.get("funding_txid", ""),
                             "escrow_address": task.get("escrow_address", ""),
-                            "settlement": "dry_run",
+                            "settlement": settlement,
                             "txid": r.get("txid")})
     for v, sats in verifier_sats.items():
         rv = await sender.send(v, sats, f"swarmgit verifier: {task_id}")
@@ -372,8 +373,9 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     await store.bump_reputation(winner, score=10, tasks_won=1)
     task["status"] = "settled"
     await store.put_task(task)
-    return {"ok": True, "task_id": task_id, "dry_run": True,
-            "funds_moved": False, "bounty_sats": bounty,
+    live = any(p.get("settlement") == "live" for p in payouts)
+    return {"ok": True, "task_id": task_id, "dry_run": not live,
+            "funds_moved": live, "bounty_sats": bounty,
             "funding_txid": task.get("funding_txid", ""),
             "winner": winner, "payouts": payouts,
             "note": "DRY-RUN ONLY. Ledger entries above are local"

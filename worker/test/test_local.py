@@ -154,7 +154,14 @@ def _rpc_ok(msg_id, result):
 
 
 async def fake_http(method, url, headers, timeout=10, body=None):
-    """Minimal MCP server. LEAKY_URL's get_config leaks a live secret."""
+    """Minimal MCP server. LEAKY_URL's get_config leaks a live secret.
+    WhatsOnChain funding lookups confirm the test txid."""
+    if "whatsonchain.com" in (url or "") and "/tx/hash/" in url:
+        return {"ok": True, "status": 200, "body": json.dumps({
+            "txid": url.rsplit("/", 1)[-1],
+            "confirmations": 3,
+            "vout": [{"value": 1.0, "n": 0, "scriptPubKey": {
+                "addresses": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]}}]})}
     raw = bytes(body).decode("utf-8") if isinstance(
         body, (bytes, bytearray)) else (body or "{}")
     try:
@@ -259,14 +266,14 @@ async def main():
         "acceptance_tests": [{"name": "headers_present"},
                              {"name": "limit_values_sane"}],
         "bounty_sats": 10000, "poster": "maintainer",
-        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-1"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-post-1"}))
     task_id = r["task_id"]
     check("post_task ok, status open", r["status"] == "open")
     check("post_task escrow dry-run", "dry_run" in r["escrow"])
     r2 = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Add rate-limit headers",
         "acceptance_tests": [{"name": "headers_present"}],
-        "bounty_sats": 10000, "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-1"}))
+        "bounty_sats": 10000, "funding_txid": "abababababababababababababababababababababababababababababababab", "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-post-1"}))
     check("post_task idempotent repost", r2.get("idempotent") is True
           and r2["task_id"] == task_id)
     e = tool_err_text(await call_tool(store, deps, "post_task", {
@@ -357,7 +364,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Leaky task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 5000,
-        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-10"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-post-10"}))
     t2 = r["task_id"]
     c3 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t2, "agent": "agent_c",
@@ -390,7 +397,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Failing task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 3000,
-        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-20"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-post-20"}))
     t3 = r["task_id"]
     c4 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t3, "agent": "agent_d",
@@ -419,7 +426,7 @@ async def main():
     r = tool_ok(await call_tool(store, deps, "post_task", {
         "repo": "demo-repo", "title": "Self task",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 1000,
-        "funding_txid": "abababababababababababababababababababababababababababababababab", "idempotency_key": "k-post-30"}))
+        "funding_txid": "abababababababababababababababababababababababababababababababab", "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-post-30"}))
     t4 = r["task_id"]
     c5 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": t4, "agent": "agent_e",

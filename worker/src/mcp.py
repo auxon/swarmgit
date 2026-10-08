@@ -327,7 +327,7 @@ def _need_key(args):
 
 async def _call_tool(store, deps, name, args):
     if name == "post_task":
-        return await _post_task(store, args)
+        return await _post_task(store, deps, args)
     if name == "list_tasks":
         return await _list_tasks(store, args)
     if name == "claim_task":
@@ -349,7 +349,7 @@ async def _call_tool(store, deps, name, args):
     raise GitError(f"unknown tool: {name}")  # unreachable
 
 
-async def _post_task(store, args):
+async def _post_task(store, deps, args):
     key = _need_key(args)
     hit = _idem_hit(await store.idem_get(key), "post_task")
     if hit:
@@ -367,7 +367,13 @@ async def _post_task(store, args):
         "funding_txid": args.get("funding_txid", ""),
         "escrow_address": args.get("escrow_address", ""),
     }
+    import chain
+    escrow = (args.get("escrow_address") or "").strip()
+    watched = await chain.confirm_funding(
+        deps["http"], spec["funding_txid"], escrow, spec["bounty_sats"])
+    spec["escrow_address"] = watched["escrow_address"]
     task = await gitlib.post_task(store, spec)
+    task["confirmations"] = watched["confirmations"]
     result = {"ok": True, "task_id": task["task_id"], "repo": task["repo"],
               "bounty_sats": task["bounty_sats"], "status": task["status"],
               "escrow": "dry_run — ledger only, no funds moved",

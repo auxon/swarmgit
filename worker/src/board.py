@@ -245,24 +245,28 @@ def _bip21(address, sats):
 
 
 def _pay_panel(address, sats=0):
+    """Escrow funding, not a direct pay to the agent."""
     address = (address or "").strip()
     if not address:
         return (
             '<div class="card pay"><div>'
-            '<h2 style="margin-top:0">Pay a bounty</h2>'
-            '<p class="task-meta">No agent has supplied a receive address yet. '
-            'Set <span class="mono">SWARMSGIT_PAY_ADDRESS</span> '
-            'in wrangler.toml and redeploy. Settlement stays dry-run '
-            'until the send primitive exists; this panel is the '
-            'human payment rail.</p></div></div>')
+            '<h2 style="margin-top:0">Fund escrow</h2>'
+            '<p class="task-meta">Posting a task locks the bounty on the '
+            'dry-run ledger. To fund it for real, set '
+            '<span class="mono">SWARMSGIT_PAY_ADDRESS</span> to the escrow '
+            'wallet and redeploy. Do not pay the agent directly — that '
+            'address is the release destination after verification.</p>'
+            '</div></div>')
     uri = _bip21(address, sats)
     return (
         '<div class="card pay">%s<div>'
-        '<h2 style="margin-top:0">Pay a bounty</h2>'
-        '<p class="task-meta">Scan to pay the agent who completed the task. Address is theirs '
-        'in the wallet. Ledger settlement is still dry-run.</p>'
+        '<h2 style="margin-top:0">Fund escrow</h2>'
+        '<p class="task-meta">Pay the bounty here when you post the task. '
+        'It stays in escrow until a fork merges. The agent address is '
+        'where escrow releases, not where you pay now. Ledger settlement '
+        'is still dry-run.</p>'
         '<p class="mono addr">%s</p>'
-        '<p class="mono">%s</p></div></div>' % ( _qr_svg(uri), _e(address), _e(uri)))
+        '<p class="mono">%s</p></div></div>' % (_qr_svg(uri), _e(address), _e(uri)))
 
 
 _CLOSE_JS = r"""
@@ -382,7 +386,7 @@ async def render(store, pay_address=""):
 </header>
 <h2>🏆 Leaderboard</h2>
 {_leaderboard_table(lb)}
-{_pay_panel(pay_from_agent or pay_address, pay_sats)}
+{_pay_panel(pay_address, pay_sats)}
 {_POST_FORM}
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>
@@ -462,11 +466,10 @@ def _claims_table(claims, forks_by_claim, bounty=0):
         last4 = c.get("repo_token_last4") or "—"
         addr = (c.get("pay_address") or "").strip()
         if addr:
-            uri = _bip21(addr, bounty)
-            pay = (f'<div class="pay">{_qr_svg(uri, scale=3)}'
-                   f'<span class="mono addr">{_e(addr)}</span></div>')
+            pay = (f'<span class="mono addr">{_e(addr)}</span>'
+                   f'<div class="task-meta">release destination, not a pay-in</div>')
         else:
-            pay = '<span class="task-meta">no receive address yet</span>'
+            pay = '<span class="task-meta">no release address yet</span>'
         rows.append(
             f"<tr><td><strong>{_e(c.get('agent'))}</strong></td>"
             f"<td class=\"mono\">{_e(f.get('repo_name') or '—')}</td>"
@@ -474,7 +477,7 @@ def _claims_table(claims, forks_by_claim, bounty=0):
             f"<td>{_state_badge(c.get('status'))}</td>"
             f"<td>{pay}</td></tr>")
     return ("<table><tr><th>agent</th><th>fork</th><th>token</th>"
-            "<th>status</th><th>receives on</th></tr>"
+            "<th>status</th><th>release to</th></tr>"
             + "".join(rows) + "</table>")
 
 

@@ -304,6 +304,17 @@ async def main():
     st = tool_ok(await call_tool(store, deps, "get_task_status",
                                  {"task_id": task_id}))
     check("get_task_status shows 2 claims", len(st["claims"]) == 2)
+    check("requirements_display: status shows description",
+          st["task"].get("description") == "Every tool response carries X-RateLimit-*.")
+    check("requirements_display: status shows acceptance_tests",
+          [t.get("name") for t in st["task"].get("acceptance_tests", [])]
+          == ["headers_present", "limit_values_sane"])
+    li = tool_ok(await call_tool(store, deps, "list_tasks", {}))
+    row = [t for t in li["tasks"] if t["task_id"] == task_id][0]
+    check("requirements_display: list shows description+acceptance",
+          row.get("description") == "Every tool response carries X-RateLimit-*."
+          and [t.get("name") for t in row.get("acceptance_tests", [])]
+          == ["headers_present", "limit_values_sane"])
 
     # -- 3. submit -> verify ---------------------------------------------
     s1 = tool_ok(await call_tool(store, deps, "submit_work", {
@@ -452,15 +463,31 @@ async def main():
         resp = await app.fetch(req)
         return resp.status, json.loads(resp.body or "{}")
 
-    s, _ = await fetch_json("POST", "/mcp", headers={}, body={
+    s, b = await fetch_json("POST", "/mcp", headers={}, body={
         "jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    check("entry: no bearer -> 401", s == 401)
+    check("entry: no bearer -> tools/list is public",
+          s == 200 and any(t["name"] == "register_agent"
+                           for t in b["result"]["tools"]))
     s, b = await fetch_json("POST", "/mcp",
                             headers={"Authorization": "Bearer test-token"},
                             body={"jsonrpc": "2.0", "id": 1,
                                   "method": "tools/list"})
     check("entry: bearer -> tools/list 200",
-          s == 200 and len(b["result"]["tools"]) == 9)
+          s == 200 and len(b["result"]["tools"]) == 11)
+    s, b = await fetch_json("POST", "/mcp", headers={}, body={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "list_tasks", "arguments": {}}})
+    tasks = json.loads(b["result"]["content"][0]["text"])["tasks"]
+    check("entry: no bearer -> public read list_tasks 200",
+          s == 200 and len(tasks) > 0
+          and all("description" in t and "acceptance_tests" in t
+                  for t in tasks))
+    s, _ = await fetch_json("POST", "/mcp", headers={}, body={
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "claim_task",
+                   "arguments": {"task_id": "t", "agent": "a",
+                                 "idempotency_key": "k"}}})
+    check("entry: no bearer -> claim_task 401", s == 401)
     s, _ = await fetch_json("GET", "/mcp",
                             headers={"Authorization": "Bearer test-token"})
     check("entry: GET /mcp -> 405", s == 405)

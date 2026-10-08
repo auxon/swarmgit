@@ -65,8 +65,10 @@ def split_bounty(bounty_sats, verifiers):
 
 # ---------------------------------------------------------------- post
 
-async def post_task(store, spec, task_id=None):
-    """Validate a task spec, create the task, lock escrow (dry-run)."""
+def validate_spec(spec):
+    """Free shape checks for a task spec. Runs before any network/chain
+    work so malformed posts fail fast with a spec error, not a chain
+    error."""
     repo = (spec.get("repo") or "").strip()
     if not repo:
         raise GitError("refused: repo is required (Artifacts repo name)")
@@ -86,6 +88,15 @@ async def post_task(store, spec, task_id=None):
     if bounty <= 0:
         raise GitError("refused: bounty_sats must be funded — post a"
                        " positive bounty after paying escrow")
+
+
+async def post_task(store, spec, task_id=None):
+    """Validate a task spec, create the task, lock escrow (dry-run)."""
+    validate_spec(spec)
+    repo = (spec.get("repo") or "").strip()
+    title = (spec.get("title") or "").strip()
+    tests = spec.get("acceptance_tests")
+    bounty = spec.get("bounty_sats")
     funding_txid = validate_funding_txid(spec.get("funding_txid"))
     escrow_address = (spec.get("escrow_address") or "").strip()
     task_id = task_id or nid("task_")

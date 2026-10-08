@@ -150,8 +150,10 @@ CREATE TABLE IF NOT EXISTS agent_keys (
   token_hash TEXT NOT NULL,
   pay_address TEXT NOT NULL,
   created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sgagent_hash ON agent_keys(token_hash);
+)
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sgagent_hash ON agent_keys(token_hash)",
+    """
 CREATE TABLE IF NOT EXISTS disputes (
   dispute_id TEXT PRIMARY KEY,
   fork_id TEXT NOT NULL,

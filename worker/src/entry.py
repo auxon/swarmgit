@@ -126,8 +126,9 @@ class Default(WorkerEntrypoint):
 
 
         if path == "/walletd/pending" and method == "GET":
-            if not self._walletd_authed(request):
-                return Response(json.dumps({"error": "unauthorized"}),
+            why = self._walletd_auth_error(request)
+            if why:
+                return Response(json.dumps({"error": why}),
                                 status=401, headers=JSON)
             store = await self._db()
             return Response(json.dumps({"ok": True,
@@ -135,8 +136,9 @@ class Default(WorkerEntrypoint):
                             headers=JSON)
 
         if path == "/walletd/release" and method == "POST":
-            if not self._walletd_authed(request):
-                return Response(json.dumps({"error": "unauthorized"}),
+            why = self._walletd_auth_error(request)
+            if why:
+                return Response(json.dumps({"error": why}),
                                 status=401, headers=JSON)
             try:
                 body = _to_py(await request.json()) or {}
@@ -305,16 +307,21 @@ class Default(WorkerEntrypoint):
     def _walletd_url(self):
         return (getattr(self.env, "SWARMSGIT_WALLETD_URL", "") or "").strip()
 
-    def _walletd_authed(self, request):
+    def _walletd_auth_error(self, request):
+        """None if the bearer matches. A string if the puller should stop."""
         expected = (getattr(self.env, "SWARMSGIT_WALLETD_TOKEN", "") or "").strip()
         if not expected:
-            return False
+            return "worker secret SWARMSGIT_WALLETD_TOKEN is not set"
         try:
             auth = request.headers.get("Authorization") or ""
         except Exception:
-            return False
+            auth = ""
         token = str(auth)[7:].strip() if str(auth).startswith("Bearer ") else ""
-        return token == expected
+        if not token:
+            return "missing bearer"
+        if token != expected:
+            return "bearer does not match SWARMSGIT_WALLETD_TOKEN"
+        return None
 
     async def _pending_releases(self, store):
         rows = await store.ledger_all()

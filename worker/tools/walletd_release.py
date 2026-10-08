@@ -11,6 +11,7 @@ the worker, then asks loopback walletd to sign. Nothing inbound is opened.
 import json
 import os
 import ssl
+import urllib.error
 import urllib.request
 
 SWARM = os.environ.get("SWARMSGIT_URL", "https://entangleit.com/swarmgit").rstrip("/")
@@ -26,8 +27,12 @@ def _req(url, method="GET", body=None, bearer=""):
         headers["Authorization"] = "Bearer " + bearer
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     ctx = ssl._create_unverified_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=30) as res:
-        return json.loads(res.read().decode() or "{}")
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as res:
+            return json.loads(res.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:300]
+        raise SystemExit("HTTP %s %s — %s" % (e.code, url, detail)) from None
 
 
 def main():

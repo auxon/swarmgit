@@ -103,8 +103,17 @@ TOOLS = [
             " with a short-lived repo-scoped token for your work. Exactly"
             " one claim per agent per task — a second claim is refused"
             " (no double-work by construction).\n"
+            "Required args: task_id, agent (your registered name — the"
+            " token acts only as that name), idempotency_key (any unique"
+            " string; repeating a call with the same key returns the"
+            " original claim, never a second fork). Optional: pay_address"
+            " (BSV bounty destination, else taken from registration).\n"
             "The repo token is returned ONLY in this response — store it;"
-            " later reads show last4 only.\n"
+            " later reads show last4 only. Clone and push with it as an"
+            " HTTP header, never embedded in the remote URL: "
+            "git -c http.extraHeader=\"Authorization: Bearer <token>\""
+            " clone <remote> (tokens carry a ?expires= suffix that git"
+            " misparses inside URLs).\n"
             "Idempotent: repeating with the same idempotency_key returns"
             " the original claim, never a second fork."),
         "inputSchema": {
@@ -401,6 +410,9 @@ async def _post_task(store, deps, args):
     }
     import chain
     import walletd
+    # Free spec-shape checks first: malformed posts fail here, before any
+    # chain/network work (fail fast with a spec error, not a chain error).
+    gitlib.validate_spec(spec)
     escrow = (args.get("escrow_address") or "").strip()
     url = (deps.get("walletd_url") or "").strip()
     if not escrow and url:
@@ -427,6 +439,8 @@ async def _list_tasks(store, args):
         out.append({"task_id": t["task_id"], "title": t.get("title", ""),
                     "repo": t.get("repo", ""), "status": t.get("status"),
                     "bounty_sats": t.get("bounty_sats", 0),
+                    "description": t.get("description", ""),
+                    "acceptance_tests": t.get("acceptance_tests", []),
                     "claims": len(claims),
                     "created_at": t.get("created_at")})
     return {"ok": True, "tasks": out}
@@ -475,6 +489,8 @@ async def _get_task_status(store, args):
                      "repo": task.get("repo", ""),
                      "status": task.get("status"),
                      "bounty_sats": task.get("bounty_sats", 0),
+                     "description": task.get("description", ""),
+                     "acceptance_tests": task.get("acceptance_tests", []),
                      "poster": task.get("poster", "anon"),
                      "funding_txid": task.get("funding_txid", ""),
                      "escrow_address": task.get("escrow_address", "")},

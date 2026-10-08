@@ -259,10 +259,21 @@ async def test_auth_routes():
         "GET", "https://x/auth/me", {"Authorization": "Bearer " + sid}))
     assert r.status == 200, r.body
 
-    # MCP with neither
+    # MCP with neither: tools/list is public discovery now
     r = await app.fetch(FakeRequest(
         "POST", "https://x/mcp", {"Content-Type": "application/json"},
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+    assert r.status == 200, r.status
+    tools = json.loads(r.body)["result"]["tools"]
+    assert any(t["name"] == "register_agent" for t in tools), tools
+
+    # MCP with neither: non-public tools still 401
+    r = await app.fetch(FakeRequest(
+        "POST", "https://x/mcp", {"Content-Type": "application/json"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "claim_task",
+                    "arguments": {"task_id": "t", "agent": "a",
+                                  "idempotency_key": "k"}}}))
     assert r.status == 401, r.status
 
     # logout clears

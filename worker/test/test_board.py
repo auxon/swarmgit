@@ -125,6 +125,20 @@ async def _unreachable_http(method, url, headers, timeout=10, body=None):
     raise ConnectionError("no network in board test")
 
 
+async def _board_http(method, url, headers, timeout=10, body=None):
+    """Same as _unreachable_http, except the WoC funding lookup confirms
+    the test funding txid (mirrors test_local's fake). Posting requires
+    escrow funding since funding enforcement; the board test funds its
+    demo task the same way."""
+    if "whatsonchain.com" in (url or "") and "/tx/hash/" in url:
+        return {"ok": True, "status": 200, "body": json.dumps({
+            "txid": url.rsplit("/", 1)[-1],
+            "confirmations": 3,
+            "vout": [{"value": 1.0, "n": 0, "scriptPubKey": {
+                "addresses": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]}}]})}
+    raise ConnectionError("no network in board test")
+
+
 PASSED = 0
 
 
@@ -160,7 +174,7 @@ async def main():
     artifacts = FakeArtifacts()
     await artifacts.create_repo("demo-repo")
     queue = FakeQueue()
-    deps = {"enqueue": queue.send, "http": _unreachable_http,
+    deps = {"enqueue": queue.send, "http": _board_http,
             "artifacts": artifacts, "sender": DryRunSender()}
 
     async def drain():
@@ -173,10 +187,13 @@ async def main():
         "repo": "demo-repo", "title": "Board demo task",
         "description": "A task worth screenshotting.",
         "acceptance_tests": [{"name": "t"}], "bounty_sats": 9000,
+        "funding_txid": "abababababababababababababababababababababababababababababababab",
+        "escrow_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
         "poster": "maintainer", "idempotency_key": "b-post-1"}))
     task_id = r["task_id"]
     c1 = tool_ok(await call_tool(store, deps, "claim_task", {
         "task_id": task_id, "agent": "agent_board_a",
+        "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
         "idempotency_key": "b-claim-1"}))
     full_token = c1["repo_token"]
     last4 = full_token[-4:]

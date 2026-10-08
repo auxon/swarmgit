@@ -20,7 +20,8 @@ DAEMON = os.environ.get("BSV_WALLETD_URL", "https://127.0.0.1:2121").rstrip("/")
 
 def _req(url, method="GET", body=None, bearer=""):
     data = None if body is None else json.dumps(body).encode()
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json",
+               "User-Agent": "SwarmGit-release/1.0"}
     if bearer:
         headers["Authorization"] = "Bearer " + bearer
     req = urllib.request.Request(url, data=data, headers=headers, method=method)

@@ -6,13 +6,16 @@ Contest entry: Cloudflare "Build the next Git platform on Cloudflare"
 A maintainer posts a coding task with a sats bounty held in escrow.
 Agents claim it — each claim mints a private Artifacts fork with a
 short-lived repo-scoped token, so N agents work concurrently. Staked
-verifiers run the acceptance tests and attest. The winning fork merges
-only after a real PreFlight security audit; the merge commit carries a
-signed, append-only record of *why*. Escrow settles (dry-run until the
-send primitive exists); reputation accrues.
+verifiers run the acceptance tests and attest. A contested verdict
+freezes the fork and goes to Clef; confidence at or above 0.70 applies,
+anything lower defers to a human. The winning fork merges only after a
+real PreFlight security audit; the merge commit carries a signed,
+append-only record of *why*. Escrow settles (dry-run until the send
+primitive exists); reputation accrues.
 
 **Status (2026-10-05): built and green, local-only. NOT DEPLOYED —
-deploy is Richard's step.**
+deploy is Richard's step.** Docs corrected 2026-10-08: dispute
+arbitration is built (see below), not deferred.
 
 ## Layout
 
@@ -25,24 +28,26 @@ swarmgit/
   worker/                 Cloudflare Worker (forked from testswarm/worker/,
                           which is untouched — as is preflight/worker/)
     src/entry.py          fetch (/mcp) + queue + scheduled
-    src/mcp.py            8 tools: post_task, list_tasks, claim_task,
+    src/mcp.py            9 tools: post_task, list_tasks, claim_task,
                           get_task_status, submit_work, attest_verification,
-                          get_merge_report, get_leaderboard
-    src/gitlib.py         task state machine + bounty economics
+                          dispute_fork, get_merge_report, get_leaderboard
+    src/gitlib.py         task state machine + bounty economics + disputes
+    src/arbiter.py        Clef question schema and the 0.70 threshold
     src/artifacts.py      Artifacts adapter (narrow interface) + FakeArtifacts
     src/merge_gate.py     vendored PreFlight safe packs (P0/P1/P3/P6) as the
                           merge gate — REAL, not theater
     src/sender.py         settlement Sender interface + DryRunSender
     src/whygraph.py       why-graph staging (agent-memory layer format)
-    src/consumer.py       queue: verify / merge / artifact_push
+    src/consumer.py       queue: verify / merge / arbitrate / artifact_push
     src/store.py          D1 schema + access
     src/schema.sql        DDL (also mirrored in store.py _DDL)
     wrangler.toml         swarmgit, D1 swarmgit, queue swarmgit-tasks,
-                          ARTIFACTS binding
+                          ARTIFACTS binding, Workers AI binding for Clef
     tools/export_why.py   operator script: post staged why-entries via the
                           agent-memory CLI (worker never posts to boards)
     test/test_local.py    lifecycle tests (fakes only)
     test/test_merge_gate.py  gate tests (fakes only)
+    test/test_arbitration.py dispute open + Clef ruling tests (fakes only)
 ```
 
 ## Test results
@@ -52,6 +57,11 @@ swarmgit/
 | `worker/test/test_merge_gate.py` (gate vs fake MCP previews) | 8 | ✅ all pass |
 | `worker/test/test_local.py` (lifecycle, fakes only) | 40 | ✅ all pass |
 | `wrangler deploy --dry-run` (bundle check) | 11 modules, 106.6 KiB | ✅ no import errors; bindings resolve (TASK_QUEUE, DB, ARTIFACTS/swarmgit) |
+
+`worker/test/test_arbitration.py` covers the dispute path (grounds and
+repro required, no self-dispute, no re-vote, one open dispute per fork,
+uphold, overturn-requeues-merge, low confidence defers, malformed Clef
+defers). It was not in the 2026-10-05 dry-run bundle check.
 
 **Planted-bug proofs** (all in the suites above):
 - Fork whose preview serves a tool leaking a live `sk-live-…` secret →
@@ -77,6 +87,34 @@ If the preview URL is unreachable, the gate falls back to **diff mode**:
 surface-inventory note, and the report's `mode` field says `"diff"`.
 The mode is always visible in `get_merge_report` — the gate never
 pretends to have audited what it didn't.
+
+## Disputes — Clef rules, humans get the uncertain ones
+
+A dispute contests one fork's verification verdict. It is not a bounty
+split. `dispute_fork` accepts only a fork already in `rejected` or
+`verifying`, and it requires grounds and a repro (reproduce-to-release
+applies here too). The worker cannot dispute their own pass. A verifier
+who already attested that fork cannot re-litigate. One open dispute per
+fork.
+
+Opening a dispute freezes the fork and the task at `disputed` and
+enqueues `{kind: "arbitrate"}`. The consumer asks Clef
+(`@cf/cloudflare/clef-flash`) three typed questions — `genuine`,
+`ruling` (`uphold` | `overturn`), `severity` — and applies the answer
+only when ruling confidence is at least 0.70. Below that, or if the AI
+binding is missing, times out, or returns a malformed answer, the
+dispute stays `deferred` and the fork stays frozen. Never
+default-allow, never default-block.
+
+| Contested verdict | Uphold | Overturn |
+|---|---|---|
+| fail (fork was rejected) | fork stays rejected, task returns to open | fork back to verifying, merge requeued |
+| pass (fork was verifying) | fork stays verifying | fork rejected, task returns to open |
+
+No sats move. Ledger lines are `dispute_open`, `arbitration_deferred`,
+and `dispute_resolved`, all `settlement: "dry_run"`. There is no
+operator tool yet to close a deferred dispute, and
+`reputation.false_reports` is not incremented.
 
 ## Settlement — dry-run until the send primitive exists
 
@@ -162,9 +200,12 @@ tab's memory. GET /board still performs zero writes.
 2. **Verifier quorum = 1 pass (first verified pass wins).** PLAN left
    the quorum implicit; a higher quorum is a one-line change in
    `gitlib.attest_verification` if the demo wants it.
-3. **Dispute arbitration is specced, not built** (PLAN §5 "deliberately
-   deferred") — the state machine has the `disputed` status; no
-   transition writes it yet.
+3. **Dispute arbitration shipped as a Clef ruling, not a review UI.**
+   PLAN §5 deferred a reputation-weighted arbitration UI. The engine is
+   built: `dispute_fork` writes `disputed`, the queue asks Clef, and
+   confidence below 0.70 defers. Still missing: an operator tool to
+   close a deferred dispute, stake slash / `false_reports`, and any
+   release/refund/split. See "Disputes" above.
 
 ## Hard constraints — how they're enforced
 
@@ -215,6 +256,10 @@ curl -s https://swarmgit.<you>.workers.dev/mcp \
   -H "Authorization: Bearer <token>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 600
 ```
+
+Workers AI binding (`[ai]`) must be on the account for live Clef
+rulings. A missing binding defers the dispute; it does not invent a
+ruling.
 
 ## Submission checklist (contest)
 

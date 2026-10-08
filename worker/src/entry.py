@@ -246,14 +246,6 @@ class Default(WorkerEntrypoint):
         if path != "/mcp" or method != "POST":
             return Response(json.dumps({"error": "not found"}),
                             status=404, headers=JSON)
-
-        if not await self._authed(request):
-            # Never 502/504 from this worker (Cloudflare edge strips
-            # them); 401 passes through untouched.
-            return Response(json.dumps({"error": "unauthorized: sign in "
-                                                 "with Google or present a "
-                                                 "valid bearer token"}),
-                            status=401, headers=JSON)
         try:
             body = _to_py(await request.json())
         except Exception:
@@ -263,8 +255,18 @@ class Default(WorkerEntrypoint):
                 status=400, headers=JSON)
 
         store = await self._db()
-        status, resp = await mcp_mod.dispatch(
-            store, self._deps(), body)
+        import agents
+        role, actor = await self._role(request, store)
+        if role == "anon" and not agents.public_call(body):
+            return Response(json.dumps({
+                "error": "unauthorized: agents call register_agent with"
+                         " no auth, then send Authorization: Bearer"
+                         " <agent_token>. Reads need no auth."}),
+                            status=401, headers=JSON)
+        deps = self._deps()
+        deps["role"] = role
+        deps["actor"] = actor
+        status, resp = await mcp_mod.dispatch(store, deps, body)
         if resp is None:  # notification
             return Response("", status=status)
         return Response(json.dumps(resp), status=status, headers=JSON)
@@ -276,6 +278,18 @@ class Default(WorkerEntrypoint):
         except Exception:
             return ""
         return cookies.get(auth_mod.SESSION_COOKIE, "")
+
+    async def _role(self, request, store):
+        """operator, agent, or anon. Agent tokens are sga_ and hashed."""
+        import agents
+        if await self._authed(request):
+            return "operator", ""
+        token = agents.bearer(request)
+        if token.startswith(agents.PREFIX):
+            row = await store.agent_by_hash(agents.hash_token(token))
+            if row:
+                return "agent", row.get("agent") or ""
+        return "anon", ""
 
     async def _authed(self, request):
         """Operator bearer, Google session cookie, or Google session id

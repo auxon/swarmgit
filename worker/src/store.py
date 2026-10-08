@@ -144,6 +144,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     """,
     "CREATE INDEX IF NOT EXISTS idx_sgsessions_exp ON sessions(expires_at)",
     """
+
+CREATE TABLE IF NOT EXISTS agent_keys (
+  agent TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  pay_address TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sgagent_hash ON agent_keys(token_hash);
 CREATE TABLE IF NOT EXISTS disputes (
   dispute_id TEXT PRIMARY KEY,
   fork_id TEXT NOT NULL,
@@ -516,3 +524,19 @@ class D1Store:
         await self._run("INSERT INTO post_rate (host, at) VALUES (?, ?)",
                         key, now)
         return True
+
+    async def put_agent_key(self, agent, token_hash, pay_address):
+        await self._run(
+            "INSERT INTO agent_keys (agent, token_hash, pay_address, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            agent, token_hash, pay_address, int(__import__("time").time()))
+
+    async def agent_by_hash(self, token_hash):
+        return await self._first(
+            "SELECT agent, pay_address FROM agent_keys WHERE token_hash = ?",
+            token_hash)
+
+    async def agent_exists(self, agent):
+        r = await self._first(
+            "SELECT 1 AS x FROM agent_keys WHERE agent = ?", agent)
+        return r is not None

@@ -36,6 +36,24 @@ def _req_int(args, name, minimum=0):
 
 TOOLS = [
     {
+        "name": "register_agent",
+        "description": (
+            "Register an agent and receive a bearer token. No auth."
+            " The token is returned once. Send it as"
+            " Authorization: Bearer <token> to claim, submit, attest,"
+            " and dispute. It cannot post tasks or close disputes."
+            " The name you register is the agent you must act as."),
+        "inputSchema": {
+            "type": "object",
+            "required": ["agent", "pay_address"],
+            "properties": {
+                "agent": {"type": "string"},
+                "pay_address": {"type": "string",
+                                "description": "BSV address escrow releases to."},
+            },
+        },
+    },
+    {
         "name": "post_task",
         "description": (
             "Post a coding task with a sats bounty: Artifacts repo, title,"
@@ -326,6 +344,20 @@ def _need_key(args):
 
 
 async def _call_tool(store, deps, name, args):
+    if name == "register_agent":
+        return await _register_agent(store, args)
+    role = deps.get("role") or "operator"
+    actor = deps.get("actor") or ""
+    if role == "agent" and name not in ("claim_task", "submit_work",
+                                        "attest_verification", "dispute_fork",
+                                        "get_merge_report", "list_tasks",
+                                        "get_task_status", "get_leaderboard"):
+        raise GitError("refused: this token cannot " + name)
+    if role == "agent" and name in ("claim_task", "submit_work",
+                                    "attest_verification", "dispute_fork"):
+        who = args.get("agent") or args.get("disputer") or ""
+        if who != actor:
+            raise GitError("refused: this token acts only as " + actor)
     if name == "post_task":
         return await _post_task(store, deps, args)
     if name == "list_tasks":
@@ -563,3 +595,17 @@ async def _close_dispute(store, deps, args):
               **outcome}
     await store.idem_put(key, "close_dispute", result)
     return result
+
+async def _register_agent(store, args):
+    agent = (args.get("agent") or "").strip()
+    if not agent or len(agent) > 40:
+        raise GitError("refused: agent name is required, 40 chars max")
+    addr = gitlib.validate_pay_address(args.get("pay_address"))
+    if await store.agent_exists(agent):
+        raise GitError("refused: that agent name is already registered")
+    import agents
+    token = agents.mint_token()
+    await store.put_agent_key(agent, agents.hash_token(token), addr)
+    return {"ok": True, "agent": agent, "pay_address": addr,
+            "agent_token": token,
+            "note": "store this token; it is not shown again"}

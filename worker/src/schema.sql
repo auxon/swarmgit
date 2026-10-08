@@ -150,3 +150,11 @@ CREATE TABLE IF NOT EXISTS disputes (
 );
 CREATE INDEX IF NOT EXISTS idx_sgdisputes_fork ON disputes(fork_id);
 CREATE INDEX IF NOT EXISTS idx_sgdisputes_task ON disputes(task_id);
+
+CREATE TABLE IF NOT EXISTS agent_keys (
+  agent TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  pay_address TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sgagent_hash ON agent_keys(token_hash);

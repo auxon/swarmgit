@@ -392,7 +392,7 @@ async def render(store, pay_address=""):
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>
 {''.join(cards) if cards else '<div class="card empty">No tasks posted yet.</div>'}
-<footer>settlement is dry-run until the send primitive exists · pay the address above · never shows full repo tokens</footer>
+<footer>escrow lock is a ledger line · release goes live when the walletd puller posts the txid · never shows full repo tokens</footer>
 """
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"

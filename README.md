@@ -192,9 +192,12 @@ The board QR is the escrow wallet (`SWARMSGIT_PAY_ADDRESS`).
 must pay `SWARMSGIT_PAY_ADDRESS` at least the bounty, or the post
 is refused. The txid is stored on the task. Release watches that
 txid again, then broadcasts a P2PKH payment to the agent's address
-Release asks bsv-walletd `send` at `SWARMSGIT_WALLETD_URL`. The
-daemon signs with the seed and broadcasts. No URL, no broadcast —
-the release stays dry-run. The phrase never enters the worker.
+Release does not open the daemon to the internet. The worker queues
+a `release_requested` ledger line. On the machine where bsv-walletd
+is unlocked, `worker/tools/walletd_release.py` dials out, calls
+loopback `send`, and posts the txid back to `/walletd/release`.
+Auth is `SWARMSGIT_WALLETD_TOKEN`. The phrase never leaves the daemon.
+A phone still uses the existing path: Tailscale plus `bsv device pair`.
 
 ## workerd quirks (same family as the TestSwarm/PreFlight builds)
 

@@ -124,6 +124,33 @@ class Default(WorkerEntrypoint):
                 "tools": [t["name"] for t in mcp_mod.TOOLS],
             }), headers=JSON)
 
+
+        if path == "/walletd/pending" and method == "GET":
+            if not self._walletd_authed(request):
+                return Response(json.dumps({"error": "unauthorized"}),
+                                status=401, headers=JSON)
+            store = await self._db()
+            return Response(json.dumps({"ok": True,
+                                        "pending": await self._pending_releases(store)}),
+                            headers=JSON)
+
+        if path == "/walletd/release" and method == "POST":
+            if not self._walletd_authed(request):
+                return Response(json.dumps({"error": "unauthorized"}),
+                                status=401, headers=JSON)
+            try:
+                body = _to_py(await request.json()) or {}
+            except Exception:
+                return Response(json.dumps({"ok": False, "error": "parse error"}),
+                                status=400, headers=JSON)
+            store = await self._db()
+            try:
+                out = await self._ack_release(store, body)
+            except Exception as ex:
+                return Response(json.dumps({"ok": False, "error": str(ex)}),
+                                status=400, headers=JSON)
+            return Response(json.dumps(out), headers=JSON)
+
         if path == "/board" and method == "GET":
             # Public, read-only demo view (contest video). No auth, no
             # writes: board.render only calls the store's read methods.
@@ -277,6 +304,50 @@ class Default(WorkerEntrypoint):
 
     def _walletd_url(self):
         return (getattr(self.env, "SWARMSGIT_WALLETD_URL", "") or "").strip()
+
+    def _walletd_authed(self, request):
+        expected = (getattr(self.env, "SWARMSGIT_WALLETD_TOKEN", "") or "").strip()
+        if not expected:
+            return False
+        try:
+            auth = request.headers.get("Authorization") or ""
+        except Exception:
+            return False
+        token = str(auth)[7:].strip() if str(auth).startswith("Bearer ") else ""
+        return token == expected
+
+    async def _pending_releases(self, store):
+        rows = await store.ledger_all()
+        done = {r.get("detail", {}).get("task_id") for r in rows
+                if r.get("kind") == "release_done"}
+        pending = []
+        for r in rows:
+            if r.get("kind") != "release_requested":
+                continue
+            detail = r.get("detail") or {}
+            if detail.get("task_id") in done:
+                continue
+            pending.append({"task_id": detail.get("task_id"),
+                            "to": detail.get("to"),
+                            "sats": int(r.get("sats") or 0),
+                            "funding_txid": detail.get("funding_txid", ""),
+                            "label": detail.get("label") or "swarmgit release"})
+        return pending
+
+    async def _ack_release(self, store, body):
+        task_id = (body.get("task_id") or "").strip()
+        txid = (body.get("txid") or "").strip().lower()
+        if not task_id or len(txid) != 64:
+            raise RuntimeError("task_id and 64-char txid required")
+        pending = await self._pending_releases(store)
+        hit = next((p for p in pending if p["task_id"] == task_id), None)
+        if not hit:
+            raise RuntimeError("no pending release for that task")
+        await store.ledger_add("release_done", task_id, hit["to"], hit["sats"],
+                               {"task_id": task_id, "txid": txid,
+                                "funding_txid": hit.get("funding_txid", ""),
+                                "settlement": "live", "signed_by": "bsv-walletd"})
+        return {"ok": True, "task_id": task_id, "txid": txid}
 
     def _sender(self):
         url = self._walletd_url()

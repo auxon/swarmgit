@@ -116,7 +116,18 @@ async def _on_merge(store, deps, msg):
             await chain.confirm_funding(
                 deps["http"], task["funding_txid"],
                 task.get("escrow_address") or "", task.get("bounty_sats") or 0)
-        await gitlib.settle_task(store, deps["sender"], task_id)
+        settled = await gitlib.settle_task(store, deps["sender"], task_id)
+        if not settled.get("funds_moved"):
+            payout = next((p for p in settled.get("payouts") or []
+                           if p.get("agent")), None)
+            if payout and payout.get("to"):
+                await store.ledger_add(
+                    "release_requested", task_id, payout["to"],
+                    int(payout.get("sats") or 0),
+                    {"task_id": task_id, "to": payout["to"],
+                     "funding_txid": settled.get("funding_txid", ""),
+                     "label": "swarmgit release %s" % task_id,
+                     "settlement": "pending"})
     except Exception:
         # settlement must never lose the merge record; the task stays
         # "merging" so an operator can retry settle_task.

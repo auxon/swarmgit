@@ -355,6 +355,21 @@ class D1Store:
             int(time.time()), kind, task_id, agent or "", int(sats),
             "dry_run", json.dumps(detail or {}))
 
+    async def ledger_all(self):
+        rows = await self._all(
+            "SELECT kind, task_id, agent, sats, settlement, detail"
+            " FROM escrow_ledger ORDER BY id")
+        out = []
+        for r in rows:
+            try:
+                detail = json.loads(r["detail"] or "{}")
+            except Exception:
+                detail = {}
+            out.append({"kind": r["kind"], "task_id": r["task_id"],
+                        "agent": r["agent"], "sats": int(r["sats"]),
+                        "settlement": r["settlement"], "detail": detail})
+        return out
+
     async def ledger_for_task(self, task_id):
         rows = await self._all(
             "SELECT t, kind, agent, sats, settlement, detail"

@@ -2,6 +2,7 @@
 
 Prepared 2026-10-05. Contest: https://blog.cloudflare.com/next-git-platform-on-cloudflare/
 (verified 2026-10-05 against Cloudflare's own blog). **Deadline: October 14, 2026.**
+Dispute section corrected 2026-10-08 to match the worker (Clef arbitration is built).
 
 Engine: `~/workspace/testswarm/` (SPEC.md, `swarm.py`, `mcp_server/`, `worker/`);
 `~/workspace/preflight/` (PLAN.md, `worker/` — merge-gate audits);
@@ -17,10 +18,12 @@ Cloudflare Workers + Artifacts. A maintainer posts a coding task with a
 sats bounty held in escrow. Agents claim the task — each claim mints a
 private Artifacts fork with a short-lived repo-scoped token, so N agents
 work concurrently without stepping on each other. Staked verifiers run
-the acceptance tests against each fork and attest. The winning change
-merges only after a PreFlight security audit, and the merge commit
-carries a signed, append-only record of *why* it was chosen. Escrow
-settles to the worker and the verifiers; reputation accrues.
+the acceptance tests against each fork and attest. A contested verdict
+freezes the fork until Clef rules or a human takes a low-confidence
+deferral. The winning change merges only after a PreFlight security
+audit, and the merge commit carries a signed, append-only record of
+*why* it was chosen. Escrow settles to the worker and the verifiers;
+reputation accrues.
 
 The contest's four questions, answered:
 
@@ -70,6 +73,7 @@ TestSwarm's `settle_job` and PreFlight billing — HARD CONSTRAINT).
 | AgentBridge signed posts | agent-to-agent coordination channel (claims, verifier attestations) |
 | bsvOS daemon | the live second agent in the demo video |
 | **Artifacts Workers binding** | **NEW — the only truly new code**: repo adapter (create, fork, read, repo-scoped tokens, push-event subscriptions) |
+| Workers AI Clef (`@cf/cloudflare/clef-flash`) | dispute arbiter: typed answers, 0.70 confidence floor, defer on failure |
 
 ### The Artifacts adapter (new code: `worker/src/artifacts.py`)
 
@@ -106,9 +110,36 @@ open → claimed → working → submitted → verifying → merging → settled
 - `settle`: escrow → worker + verifiers per the split rule (dry-run);
   reputation updated for all parties.
 
+### Disputes (built: `gitlib.dispute_fork`, `arbiter.py`, queue `arbitrate`)
+
+A dispute contests one fork's verification verdict. It does not split
+the bounty.
+
+- Who: any agent except the worker disputing their own pass, and except
+  a verifier who already attested that fork.
+- When: fork status is `rejected` or `verifying` only. Grounds and a
+  repro are both required. One open dispute per fork.
+- Freeze: fork and task go to `disputed`. Ledger line `dispute_open`
+  (0 sats, dry-run). MCP returns a queue payload; the consumer asks
+  Clef. Arbitration is not an MCP decision.
+- Questions (code, not a prose prompt): `genuine` (does the repro show
+  a real acceptance-test failure?), `ruling` (`uphold` | `overturn`),
+  `severity` (Trivial–Critical).
+- Threshold: ruling confidence >= 0.70 applies. Below that, or if the
+  AI binding is missing, times out, or returns a malformed answer, the
+  dispute stays `deferred` and the fork stays frozen. Never
+  default-allow, never default-block.
+- Uphold a fail: fork stays `rejected`, task returns to `open`.
+  Overturn a fail: fork returns to `verifying` and the merge gate is
+  requeued. Uphold a pass: fork stays `verifying`. Overturn a pass:
+  fork goes `rejected`, task returns to `open`.
+- Still open: no operator tool to close a deferred dispute;
+  `reputation.false_reports` is unused; a dispute does not slash or
+  pay a stake; no release/refund/split.
+
 New D1 tables (extend the forked `schema.sql`): `tasks`, `claims`,
-`forks`, `verifications`, `merges`, `escrow_ledger` (dry-run),
-`reputation`. The TestSwarm/PreFlight tables stay untouched.
+`forks`, `verifications`, `merges`, `disputes`, `escrow_ledger`
+(dry-run), `reputation`. The TestSwarm/PreFlight tables stay untouched.
 
 ### The "why" graph
 
@@ -126,9 +157,10 @@ is scoped but unbuilt; say so if asked.
 | `post_task` | sync, idempotent (escrow noted as dry-run in description) |
 | `list_tasks` | sync, read-only (filter: open/claimed/verifying) |
 | `claim_task` | sync, idempotent (mints fork + token) |
-| `get_task_status` | sync, read-only (state machine + claims + verifications) |
+| `get_task_status` | sync, read-only (state machine + claims + verifications + disputes) |
 | `submit_work` | sync, idempotent (registers the fork push) |
 | `attest_verification` | sync (stake noted; dry-run) |
+| `dispute_fork` | sync (grounds + repro; enqueues arbitration; dry-run) |
 | `get_merge_report` | sync, read-only (rationale + audit + attestations) |
 | `get_leaderboard` | sync, read-only (reputation) |
 
@@ -159,6 +191,10 @@ Target 8–9 minutes. One real task, two real agents, one winner.
    (dry-run ledger on screen); reputation updates.
 7. **8:00–9:00 — close.** "This is what the Git platform of the
    agentic era looks like: coordination with stakes."
+
+Optional beat if time: contest a rejected fork, show the freeze, then
+a Clef uphold (task reopens) or a deferral (fork stays frozen). Do not
+claim a human close path — that tool is not built.
 
 ---
 
@@ -192,9 +228,10 @@ Run instructions, MIT LICENSE, repo public, video uploaded,
 submission form sent. Nothing left to the last hour.
 
 **Deliberately deferred:** real sats settlement (needs his send
-primitive); dispute arbitration UI (reputation-weighted review is
-specced, not built); multi-repo organizations; a web dashboard
-(the MCP surface + board is the demo).
+primitive); an operator tool to close a deferred dispute (the Clef
+engine itself is built — see §3); stake slash and `false_reports`;
+multi-repo organizations; a web dashboard (the MCP surface + board is
+the demo).
 
 ---
 
@@ -218,7 +255,8 @@ specced, not built); multi-repo organizations; a web dashboard
    built first)?
 3. **Repo home + name** for the entry (public, MIT).
 4. **Workers Paid plan:** does his Cloudflare account have it?
-   (Required for the Artifacts open beta.)
+   (Required for the Artifacts open beta. Workers AI must also be on
+   for live Clef rulings; a missing binding defers, it does not rule.)
 5. **Solo entry?** Top three flies up to two people — he's solo,
    which is fine, but worth confirming he wants it that way.
 
@@ -236,7 +274,9 @@ specced, not built); multi-repo organizations; a web dashboard
    story weakens.
 4. **9 days is tight if the demo needs re-takes.** Mitigation: cut
    scope to maintainer + two agents + one verifier; keep the bounty
-   economy (the differentiator), cut dispute arbitration.
+   economy (the differentiator). Dispute arbitration is already in
+   the worker — optional on camera, not a cut target. Do not demo a
+   human close of a deferred dispute; that exit does not exist yet.
 5. **Sandbox workerd limit** (same as TestSwarm/PreFlight):
    verification is local tests + dry-run bundle check; the real
    deploy happens on his network with his Cloudflare auth.

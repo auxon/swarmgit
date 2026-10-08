@@ -90,6 +90,8 @@ TOOLS = [
             "properties": {
                 "task_id": {"type": "string"},
                 "agent": {"type": "string"},
+                "pay_address": {"type": "string",
+                                "description": "Optional bitcoin address. Required by submit_work if not set here."},
                 "idempotency_key": {"type": "string"},
             },
         },
@@ -122,6 +124,8 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "claim_id": {"type": "string"},
                 "agent": {"type": "string"},
+                "pay_address": {"type": "string",
+                                "description": "Bitcoin address to receive the bounty."},
                 "preview_url": {"type": "string", "default": ""},
                 "idempotency_key": {"type": "string"},
             },
@@ -388,7 +392,9 @@ async def _claim_task(store, deps, args):
     agent = args.get("agent", "")
     if not task_id or not agent:
         raise GitError("refused: task_id and agent are required")
-    res = await gitlib.claim_task(store, deps["artifacts"], task_id, agent)
+    res = await gitlib.claim_task(
+        store, deps["artifacts"], task_id, agent,
+        args.get("pay_address", ""))
     token = res.pop("_token")
     result = {"ok": True, "claim_id": res["claim_id"],
               "fork_id": res["fork_id"], "repo_name": res["repo_name"],
@@ -422,7 +428,9 @@ async def _get_task_status(store, args):
                      "bounty_sats": task.get("bounty_sats", 0),
                      "poster": task.get("poster", "anon")},
             "claims": [{"id": c["id"], "agent": c["agent"],
-                        "status": c["status"]} for c in claims],
+                        "status": c["status"],
+                        "pay_address": c.get("pay_address", "")}
+                       for c in claims],
             "forks": [{"fork_id": f["fork_id"],
                        "repo_name": f.get("repo_name", ""),
                        "preview_url": f.get("preview_url", ""),
@@ -447,7 +455,8 @@ async def _submit_work(store, deps, args):
         return hit
     payload = await gitlib.submit_work(
         store, args.get("task_id", ""), args.get("claim_id", ""),
-        args.get("agent", ""), args.get("preview_url", ""))
+        args.get("agent", ""), args.get("preview_url", ""),
+        args.get("pay_address", ""))
     await deps["enqueue"](payload)
     result = {"ok": True, "task_id": args.get("task_id", ""),
               "fork_id": payload["fork_id"], "status": "submitted",

@@ -244,22 +244,22 @@ def _bip21(address, sats):
     return "bitcoin:%s?sv&amount=%.8f" % (address, sats / 1e8)
 
 
-def _pay_panel(address):
+def _pay_panel(address, sats=0):
     address = (address or "").strip()
     if not address:
         return (
             '<div class="card pay"><div>'
             '<h2 style="margin-top:0">Pay a bounty</h2>'
-            '<p class="task-meta">No receive address configured. '
+            '<p class="task-meta">No agent has supplied a receive address yet. '
             'Set <span class="mono">SWARMSGIT_PAY_ADDRESS</span> '
             'in wrangler.toml and redeploy. Settlement stays dry-run '
             'until the send primitive exists; this panel is the '
             'human payment rail.</p></div></div>')
-    uri = _bip21(address, 0)
+    uri = _bip21(address, sats)
     return (
         '<div class="card pay">%s<div>'
         '<h2 style="margin-top:0">Pay a bounty</h2>'
-        '<p class="task-meta">Scan to pay SwarmGit. Put the task bounty '
+        '<p class="task-meta">Scan to pay the agent who completed the task. Address is theirs '
         'in the wallet. Ledger settlement is still dry-run.</p>'
         '<p class="mono addr">%s</p>'
         '<p class="mono">%s</p></div></div>' % ( _qr_svg(uri), _e(address), _e(uri)))
@@ -353,8 +353,17 @@ async def render(store, pay_address=""):
     tasks = await store.list_tasks()
     cards = []
     deferred = []
+    pay_from_agent = ""
+    pay_sats = 0
     for t in tasks:
         cards.append(await _task_card(store, t))
+        claims = await store.claims_for_task(t.get("task_id"))
+        won = [c for c in claims if c.get("status") == "won" and c.get("pay_address")]
+        any_addr = [c for c in claims if c.get("pay_address")]
+        pick = (won or any_addr)
+        if pick and not pay_from_agent:
+            pay_from_agent = pick[-1].get("pay_address") or ""
+            pay_sats = int(t.get("bounty_sats") or 0)
         try:
             disputes = await store.disputes_for_task(t.get("task_id"))
         except Exception:
@@ -373,7 +382,7 @@ async def render(store, pay_address=""):
 </header>
 <h2>🏆 Leaderboard</h2>
 {_leaderboard_table(lb)}
-{_pay_panel(pay_address)}
+{_pay_panel(pay_from_agent or pay_address, pay_sats)}
 {_POST_FORM}
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>
@@ -427,7 +436,7 @@ async def _task_card(store, t):
             f"<p class=\"task-meta mono\">repo <strong>{_e(t.get('repo'))}</strong>"
             f" · poster {_e(t.get('poster'))} · id {_e(task_id)}</p>"
             f"{_acceptance_tests(t)}"
-            f"<h3>Claims ({len(claims)})</h3>{_claims_table(claims, forks_by_claim)}"
+            f"<h3>Claims ({len(claims)})</h3>{_claims_table(claims, forks_by_claim, bounty)}"
             f"<h3>Forks &amp; verification</h3>{_forks_section(forks)}"
             f"<h3>Disputes</h3>{_disputes_section(await store.disputes_for_task(task_id))}"
             f"<h3>Merge</h3>{_merges_section(merges)}"
@@ -444,20 +453,29 @@ def _acceptance_tests(t):
     return f"<p class=\"task-meta\">acceptance tests:</p><ul>{items}</ul>"
 
 
-def _claims_table(claims, forks_by_claim):
+def _claims_table(claims, forks_by_claim, bounty=0):
     if not claims:
         return '<div class="empty">No claims yet.</div>'
     rows = []
     for c in claims:
         f = forks_by_claim.get(c.get("id")) or {}
         last4 = c.get("repo_token_last4") or "—"
+        addr = (c.get("pay_address") or "").strip()
+        if addr:
+            uri = _bip21(addr, bounty)
+            pay = (f'<div class="pay">{_qr_svg(uri, scale=3)}'
+                   f'<span class="mono addr">{_e(addr)}</span></div>')
+        else:
+            pay = '<span class="task-meta">no receive address yet</span>'
         rows.append(
             f"<tr><td><strong>{_e(c.get('agent'))}</strong></td>"
             f"<td class=\"mono\">{_e(f.get('repo_name') or '—')}</td>"
             f"<td class=\"mono\">…{_e(last4)}</td>"
-            f"<td>{_state_badge(c.get('status'))}</td></tr>")
+            f"<td>{_state_badge(c.get('status'))}</td>"
+            f"<td>{pay}</td></tr>")
     return ("<table><tr><th>agent</th><th>fork</th><th>token</th>"
-            "<th>status</th></tr>" + "".join(rows) + "</table>")
+            "<th>status</th><th>receives on</th></tr>"
+            + "".join(rows) + "</table>")
 
 
 def _forks_section(forks):

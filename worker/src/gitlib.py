@@ -25,6 +25,21 @@ def nid(prefix):
     return prefix + secrets.token_hex(8)
 
 
+
+_B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+
+def validate_pay_address(addr):
+    """BSV receive address. Legacy base58, starts with 1 or 3."""
+    addr = (addr or "").strip()
+    if not addr.startswith(("1", "3")) or not (26 <= len(addr) <= 35) \
+            or any(c not in _B58 for c in addr):
+        raise GitError(
+            "refused: pay_address must be a bitcoin address the agent"
+            " can receive on (BSV, base58, starts with 1 or 3)")
+    return addr
+
+
 WORKER_SHARE = 0.80   # bounty fraction to the winning worker agent
 VERIFIER_SHARE = 0.20  # split evenly across passing verifiers
 
@@ -79,7 +94,7 @@ async def post_task(store, spec, task_id=None):
 
 # ---------------------------------------------------------------- claim
 
-async def claim_task(store, artifacts, task_id, agent):
+async def claim_task(store, artifacts, task_id, agent, pay_address=""):
     """Agent claims a task: exactly one claim per agent (DDL UNIQUE),
     mints a private Artifacts fork with a short-lived repo-scoped token."""
     agent = (agent or "").strip() or "anon"
@@ -98,11 +113,13 @@ async def claim_task(store, artifacts, task_id, agent):
     except artifacts_mod.ArtifactsError as e:
         raise GitError(f"refused: fork failed: {e}")
     token = await artifacts.issue_token(fork["repo_name"], ttl_s=86400)
+    addr = validate_pay_address(pay_address) if (pay_address or "").strip() else ""
     claim = {
         "id": claim_id,
         "task_id": task_id,
         "agent": agent,
         "status": "active",
+        "pay_address": addr,
         "fork_id": fork["fork_id"],
         # last4 only — the full token is shown once in the claim_task
         # response and never persisted anywhere (board-safe).
@@ -131,7 +148,7 @@ async def claim_task(store, artifacts, task_id, agent):
 
 # ---------------------------------------------------------------- submit
 
-async def submit_work(store, task_id, claim_id, agent, preview_url=""):
+async def submit_work(store, task_id, claim_id, agent, preview_url="", pay_address=""):
     """Agent submits a fork for verification. Returns the queue payload
     the caller should enqueue (kind=verify)."""
     claim = await store.get_claim(claim_id)
@@ -141,6 +158,15 @@ async def submit_work(store, task_id, claim_id, agent, preview_url=""):
         raise GitError("refused: claim belongs to another agent")
     if claim["status"] != "active":
         raise GitError(f"refused: claim is {claim['status']}, not active")
+    # Completion requires a receive address. A claim may already carry
+    # one; submit may set or replace it. Settlement pays this address.
+    supplied = (pay_address or "").strip()
+    if supplied:
+        claim["pay_address"] = validate_pay_address(supplied)
+    if not (claim.get("pay_address") or "").strip():
+        raise GitError(
+            "refused: pay_address is required to complete a task"
+            " (bitcoin address the agent receives on)")
     fork = await store.get_fork(claim["fork_id"])
     if not fork or fork["status"] != "working":
         raise GitError("refused: fork is not in working state")
@@ -289,19 +315,25 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     winner_fork = await store.get_fork(winner_fork_id)
     winner_claim = await store.get_claim(winner_fork["claim_id"])
     winner = winner_claim["agent"]
+    dest = (winner_claim.get("pay_address") or "").strip()
+    if not dest:
+        raise GitError(
+            "refused: winning agent has no pay address — agents must"
+            " provide one when they complete the task")
     verifs = await store.verifications_for_fork(winner_fork_id)
     passing = sorted({v["verifier"] for v in verifs
                       if v.get("verdict") == "pass"})
     bounty = int(task["bounty_sats"])
     worker_sats, verifier_sats = split_bounty(bounty, passing)
     payouts = []
-    r = await sender.send(winner, worker_sats,
+    r = await sender.send(dest, worker_sats,
                           f"swarmgit bounty: {task_id} winner")
-    payouts.append({"to": winner, "sats": worker_sats,
+    payouts.append({"to": dest, "agent": winner, "sats": worker_sats,
                     "settlement": r.get("settlement", "dry_run"),
                     "txid": r.get("txid")})
     await store.ledger_add("payout", task_id, winner, worker_sats,
-                           {"role": "winner", "settlement": "dry_run",
+                           {"role": "winner", "pay_address": dest,
+                            "settlement": "dry_run",
                             "txid": r.get("txid")})
     for v, sats in verifier_sats.items():
         rv = await sender.send(v, sats, f"swarmgit verifier: {task_id}")

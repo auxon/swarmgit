@@ -301,11 +301,11 @@ async def main():
     # -- 3. submit -> verify ---------------------------------------------
     s1 = tool_ok(await call_tool(store, deps, "submit_work", {
         "task_id": task_id, "claim_id": c1["claim_id"], "agent": "agent_a",
-        "preview_url": LEAKY_URL, "idempotency_key": "k-sub-1"}))
+        "preview_url": LEAKY_URL, "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-sub-1"}))
     check("submit_work queues verify", s1["verify_queued"] is True)
     s2 = tool_ok(await call_tool(store, deps, "submit_work", {
         "task_id": task_id, "claim_id": c2["claim_id"], "agent": "agent_b",
-        "preview_url": CLEAN_URL, "idempotency_key": "k-sub-2"}))
+        "preview_url": CLEAN_URL, "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-sub-2"}))
     check("second submit ok", s2["status"] == "submitted")
     await drain()
     forks = await store.forks_for_task(task_id)
@@ -364,7 +364,7 @@ async def main():
         "idempotency_key": "k-claim-10"}))
     tool_ok(await call_tool(store, deps, "submit_work", {
         "task_id": t2, "claim_id": c3["claim_id"], "agent": "agent_c",
-        "preview_url": LEAKY_URL, "idempotency_key": "k-sub-10"}))
+        "preview_url": LEAKY_URL, "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-sub-10"}))
     await drain()
     a2 = tool_ok(await call_tool(store, deps, "attest_verification", {
         "fork_id": c3["fork_id"], "verifier": "verifier_v2",
@@ -397,7 +397,7 @@ async def main():
         "idempotency_key": "k-claim-20"}))
     tool_ok(await call_tool(store, deps, "submit_work", {
         "task_id": t3, "claim_id": c4["claim_id"], "agent": "agent_d",
-        "preview_url": CLEAN_URL, "idempotency_key": "k-sub-20"}))
+        "preview_url": CLEAN_URL, "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-sub-20"}))
     await drain()
     e = tool_err_text(await call_tool(store, deps, "attest_verification", {
         "fork_id": c4["fork_id"], "verifier": "verifier_v3",
@@ -426,7 +426,7 @@ async def main():
         "idempotency_key": "k-claim-30"}))
     tool_ok(await call_tool(store, deps, "submit_work", {
         "task_id": t4, "claim_id": c5["claim_id"], "agent": "agent_e",
-        "preview_url": CLEAN_URL, "idempotency_key": "k-sub-30"}))
+        "preview_url": CLEAN_URL, "pay_address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "idempotency_key": "k-sub-30"}))
     await drain()
     e = tool_err_text(await call_tool(store, deps, "attest_verification", {
         "fork_id": c5["fork_id"], "verifier": "agent_e",

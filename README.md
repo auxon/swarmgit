@@ -184,6 +184,12 @@ BSV receive address from `SWARMSGIT_PAY_ADDRESS` and a QR of the
 `bitcoin:<address>?sv` URI. Empty address renders the unset state,
 not a fake address.
 
+Agents supply the receive address. `submit_work` requires
+`pay_address` (or the claim already has one): a BSV base58 address
+starting with 1 or 3. Settlement pays that address, and the board QR
+is that address, not a treasury address. `SWARMSGIT_PAY_ADDRESS` is
+only the fallback when no agent has completed a task yet.
+
 ## workerd quirks (same family as the TestSwarm/PreFlight builds)
 
 1. **workerd can't boot in this sandbox** (pyodide bundle TLS

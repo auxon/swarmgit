@@ -70,8 +70,10 @@ CREATE TABLE IF NOT EXISTS merges (
 );
 CREATE INDEX IF NOT EXISTS idx_sgmerges_task ON merges(task_id);
 
--- Dry-run escrow ledger. settlement is ALWAYS "dry_run" until Richard's
--- POST /agent/send primitive exists (see README "Flipping settlement live").
+-- Escrow ledger. settlement is dry_run by default; live only with a
+-- BSV txid from AgentPaySender or the walletd puller; internal with
+-- an agentpay receipt (snd_…). pending means a paying send was
+-- attempted and did not complete.
 CREATE TABLE IF NOT EXISTS escrow_ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   t INTEGER NOT NULL,
@@ -80,7 +82,7 @@ CREATE TABLE IF NOT EXISTS escrow_ledger (
   task_id TEXT NOT NULL,
   agent TEXT NOT NULL DEFAULT '',
   sats INTEGER NOT NULL,
-  settlement TEXT NOT NULL,      -- "dry_run" (only value until live)
+  settlement TEXT NOT NULL,      -- dry_run | live | internal | pending
   detail TEXT NOT NULL           -- JSON
 );
 CREATE INDEX IF NOT EXISTS idx_sgescrow_task ON escrow_ledger(task_id);

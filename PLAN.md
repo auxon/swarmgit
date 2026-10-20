@@ -40,9 +40,10 @@ coordination primitive no other entry will have. Everything else in the
 contest will be workflow plumbing; SwarmGit is a coordination
 *economy*.
 
-**What it is not:** not a GitHub UI clone; not a CI system; not
-real-money settlement on day one (dry-run ledger, same discipline as
-TestSwarm's `settle_job` and PreFlight billing — HARD CONSTRAINT).
+**What it is not:** not a GitHub UI clone; not a CI system. Settlement
+is dry-run until `SWARMSGIT_LIVE_SETTLEMENT` and `AGENTPAY_KEY` are
+set (same discipline as TestSwarm's `settle_job` and PreFlight billing
+— live send is behind a flag, never accidental).
 
 ---
 
@@ -228,10 +229,20 @@ Buffer for Artifacts beta surprises.
 Run instructions, MIT LICENSE, repo public, video uploaded,
 submission form sent. Nothing left to the last hour.
 
-**Deliberately deferred:** real sats settlement (needs his send
-primitive); a live (non-dry-run) slash; multi-repo organizations.
-The operator close and the dry-run slash are built — see §3. The
-board is the demo UI, including the pay address and QR.
+**Deliberately deferred (contest):** real sats settlement; a live
+(non-dry-run) slash; multi-repo organizations. The operator close and
+the dry-run slash are built — see §3. The board is the demo UI,
+including the pay address and QR.
+
+**Shipped after contest (2026-10-20):** automatic verifier (acceptance
+tests + Clef diff review, fail-closed) so a solo outside agent can
+claim → submit → merge-gate without a human verifier on bounties at or
+below `AUTO_VERIFY_MAX_SATS`. `AgentPaySender` against the live
+`POST /api/agentpay/agent/send` primitive, still DryRunSender by
+default; live only with `SWARMSGIT_LIVE_SETTLEMENT` + `AGENTPAY_KEY`.
+Honor agentpay `settlement` (`live` BSV txid vs `internal` snd_
+receipt). Walletd puller kept as the other path. Never mark paid
+without a txid or receipt.
 
 ---
 
@@ -250,9 +261,12 @@ board is the demo UI, including the pay address and QR.
 1. **The daemon's role:** can the bsvOS daemon commit to being the
    second agent in the live demo (rehearsal ~Oct 12)? Fallback is two
    agents run by us — still real, less impressive.
-2. **Settlement in the demo:** dry-run ledger (honest default; AgentPay
-   has no send endpoint) or real sats (needs his send primitive
-   built first)?
+2. **Settlement in the demo:** dry-run ledger is still the default.
+   AgentPay now has `POST /agent/send` (Bearer `agp_…`, idempotency
+   key, txid). SwarmGit wires `AgentPaySender` behind
+   `SWARMSGIT_LIVE_SETTLEMENT` + `AGENTPAY_KEY`. `apw_…` dests are
+   public wallet ids (auxon/agentpay#7); secret 64-hex tokens are
+   refused. Internal sends record a receipt, not a BSV tx.
 3. **Repo home + name** for the entry (public, MIT).
 4. **Workers Paid plan:** does his Cloudflare account have it?
    (Required for the Artifacts open beta. Workers AI must also be on

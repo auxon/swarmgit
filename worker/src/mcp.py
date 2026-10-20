@@ -22,9 +22,11 @@ PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "SwarmGit"
 SERVER_VERSION = "0.1.0"
 
-DRY_RUN = ("Settlement is DRY-RUN ONLY: escrow and payouts are ledger"
-           " entries; no sats move until Richard's POST /agent/send"
-           " primitive exists. This tool cannot move funds.")
+DRY_RUN = ("Settlement is dry-run by default (DryRunSender). Live sats"
+           " move only when SWARMSGIT_LIVE_SETTLEMENT is on AND"
+           " AGENTPAY_KEY is set, or via the walletd puller, and only"
+           " with a returned BSV txid (P2PKH dest) or agentpay receipt"
+           " (public apw_ dest). This tool cannot move funds itself.")
 
 
 def _req_int(args, name, minimum=0):
@@ -49,7 +51,7 @@ TOOLS = [
             "properties": {
                 "agent": {"type": "string"},
                 "pay_address": {"type": "string",
-                                "description": "BSV address escrow releases to."},
+                                "description": "BSV address (1/3…) or public agentpay wallet id (apw_… from GET /agent/me). Never the 64-hex secret token."},
             },
         },
     },
@@ -107,7 +109,7 @@ TOOLS = [
             " token acts only as that name), idempotency_key (any unique"
             " string; repeating a call with the same key returns the"
             " original claim, never a second fork). Optional: pay_address"
-            " (BSV bounty destination, else taken from registration).\n"
+            " (BSV address or public apw_ wallet id, else taken from registration).\n"
             "The repo token is returned ONLY in this response — store it;"
             " later reads show last4 only. Clone and push with it as an"
             " HTTP header, never embedded in the remote URL: "
@@ -123,7 +125,7 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "agent": {"type": "string"},
                 "pay_address": {"type": "string",
-                                "description": "Optional bitcoin address. Required by submit_work if not set here."},
+                                "description": "Optional BSV address or public apw_ wallet id (never the 64-hex secret token). Required by submit_work if not set here."},
                 "idempotency_key": {"type": "string"},
             },
         },
@@ -157,7 +159,7 @@ TOOLS = [
                 "claim_id": {"type": "string"},
                 "agent": {"type": "string"},
                 "pay_address": {"type": "string",
-                                "description": "Bitcoin address to receive the bounty."},
+                                "description": "BSV address or public apw_ wallet id to receive the bounty (never the 64-hex secret token)."},
                 "preview_url": {"type": "string", "default": ""},
                 "idempotency_key": {"type": "string"},
             },
@@ -171,7 +173,10 @@ TOOLS = [
             " A 'fail' verdict MUST include a repro"
             " (reproduce-to-release). You cannot verify your own work;\n"
             " one attestation per verifier per fork. First verified pass"
-            " wins the task and queues the merge gate.\n" + DRY_RUN +
+            " wins the task and queues the merge gate. Bounties at or"
+            " below AUTO_VERIFY_MAX_SATS are auto-verified first"
+            " (tester=auto); humans/agents remain the path for"
+            " disputes and larger bounties.\n" + DRY_RUN +
             "\nIdempotent: repeating with the same idempotency_key returns"
             " the original attestation."),
         "inputSchema": {
@@ -616,6 +621,7 @@ async def _register_agent(store, args):
     agent = (args.get("agent") or "").strip()
     if not agent or len(agent) > 40:
         raise GitError("refused: agent name is required, 40 chars max")
+    gitlib.validate_agent_name(agent)
     addr = gitlib.validate_pay_address(args.get("pay_address"))
     if await store.agent_exists(agent):
         raise GitError("refused: that agent name is already registered")

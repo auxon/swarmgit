@@ -38,8 +38,22 @@ async def http_request(method, url, headers, timeout=10, body=None):
         resp = await asyncio.wait_for(fetch(url, init_js), timeout)
         status = int(resp.status)
         text = await asyncio.wait_for(resp.text(), timeout)
+        headers_out = {}
+        try:
+            h = resp.headers
+            entries = getattr(h, "entries", None)
+            if callable(entries):
+                for pair in entries():
+                    headers_out[str(pair[0])] = str(pair[1])
+            elif hasattr(h, "items"):
+                headers_out = {str(k): str(v) for k, v in h.items()}
+            elif h is not None:
+                headers_out = dict(h)
+        except Exception:
+            headers_out = {}
         return {"ok": True, "status": status,
-                "body": str(text)[:4000], "latency_ms": ms()}
+                "body": str(text)[:4000], "headers": headers_out,
+                "latency_ms": ms()}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}",
                 "latency_ms": ms()}

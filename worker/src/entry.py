@@ -21,9 +21,15 @@ import mcp as mcp_mod  # noqa: E402
 from store import D1Store  # noqa: E402
 import consumer as consumer_mod  # noqa: E402
 import artifacts as artifacts_mod  # noqa: E402
-from sender import DryRunSender, WalletDSender  # noqa: E402
+from sender import choose_sender  # noqa: E402
+import autoverify as autoverify_mod  # noqa: E402
 import board as board_mod  # noqa: E402
 import auth as auth_mod  # noqa: E402
+
+# Optional Durable Object export. Unbound unless wrangler.toml adds a
+# SANDBOX binding (+ [[containers]] image). Auto-verify defers when the
+# container is missing; it never default-allows.
+VerifySandbox = autoverify_mod.VerifySandbox
 
 JSON = {"Content-Type": "application/json"}
 
@@ -110,6 +116,8 @@ class Default(WorkerEntrypoint):
             "sender": self._sender(),
             "walletd_url": self._walletd_url(),
             "ai": ai,
+            "sandbox": autoverify_mod.sandbox_from_env(self.env),
+            **self._auto_verify_deps(),
         }
 
     async def _fetch_inner(self, request):
@@ -370,11 +378,21 @@ class Default(WorkerEntrypoint):
                                 "settlement": "live", "signed_by": "bsv-walletd"})
         return {"ok": True, "task_id": task_id, "txid": txid}
 
+    def _auto_verify_deps(self):
+        try:
+            raw = getattr(self.env, "AUTO_VERIFY", "1")
+        except Exception:
+            raw = "1"
+        enabled = str(raw or "1").strip().lower() not in (
+            "0", "false", "no", "off")
+        try:
+            max_sats = getattr(self.env, "AUTO_VERIFY_MAX_SATS", "10000")
+        except Exception:
+            max_sats = "10000"
+        return {"auto_verify": enabled, "auto_verify_max_sats": max_sats}
+
     def _sender(self):
-        url = self._walletd_url()
-        if url:
-            return WalletDSender(self._http, url)
-        return DryRunSender()
+        return choose_sender(self.env, self._http)
 
     async def _enqueue(self, msg):
         await self.env.TASK_QUEUE.send(msg)
@@ -407,6 +425,8 @@ class Default(WorkerEntrypoint):
             "sender": self._sender(),
             "walletd_url": self._walletd_url(),
             "ai": ai,
+            "sandbox": autoverify_mod.sandbox_from_env(self.env),
+            **self._auto_verify_deps(),
         }
         for message in batch.messages:
             body = _queue_body(message.body)

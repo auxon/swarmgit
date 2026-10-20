@@ -7,13 +7,18 @@ per-task escrow, reputation) to coding tasks on Artifacts forks:
   open → claimed → working → submitted → verifying → merging → settled
      ↘ expired (bounty returned)      ↘ disputed → Clef | human close
 
-Settlement is DRY-RUN ONLY until Richard's POST /agent/send primitive
-exists. Every ledger event carries settlement="dry_run"; the Sender
-interface (sender.py) is real-ready, not a stub.
+Settlement is dry-run by default (DryRunSender). Real sats move only
+through AgentPaySender (flag + AGENTPAY_KEY) or the walletd puller,
+and only when a txid (on-chain) or receipt (internal apw_ credit)
+comes back. A failing send leaves the release pending — never marked
+paid.
 """
+import re
 import time
 
 import artifacts as artifacts_mod
+
+AUTO_VERIFIER = "auto"
 
 
 class GitError(Exception):
@@ -27,28 +32,82 @@ def nid(prefix):
 
 
 _B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-
+# Public wallet id from agentpay GET /agent/me (newId("apw")), not the
+# 64-hex secret token. Same shapes as auxon/agentpay parseSendDest.
+_WALLET_ID = re.compile(r"^apw_[0-9A-Za-z]{8,48}$")
+_WALLET_TOKEN = re.compile(r"^apw_[0-9a-fA-F]{64}$")
+_RECEIPT_ID = re.compile(r"^snd_[0-9A-Za-z_-]{4,128}$")
 
 
 def validate_funding_txid(txid):
     """BSV tx that funded escrow. 64 hex chars, no 0x prefix."""
     txid = (txid or "").strip().lower()
-    if len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
+    if not is_bsv_txid(txid):
         raise GitError(
             "refused: funding_txid is required — pay SWARMSGIT_PAY_ADDRESS"
             " the bounty first, then post the 64-char txid")
     return txid
 
 
-def validate_pay_address(addr):
-    """BSV receive address. Legacy base58, starts with 1 or 3."""
+def is_bsv_txid(txid):
+    """On-chain BSV txid: 64 hex chars, no 0x. Never an snd_ receipt."""
+    t = (txid or "").strip().lower()
+    return len(t) == 64 and all(c in "0123456789abcdef" for c in t)
+
+
+def is_agentpay_receipt_id(rid):
+    """agentpay internal send id (snd_…), not a BSV tx."""
+    return bool(_RECEIPT_ID.match((rid or "").strip()))
+
+
+def is_agentpay_wallet_token(addr):
+    """Secret apw_ Bearer token (apw_ + 64 hex). Never a pay dest."""
+    return bool(_WALLET_TOKEN.match((addr or "").strip()))
+
+
+def is_agentpay_wallet_id(addr):
     addr = (addr or "").strip()
-    if not addr.startswith(("1", "3")) or not (26 <= len(addr) <= 35) \
-            or any(c not in _B58 for c in addr):
+    if is_agentpay_wallet_token(addr):
+        return False
+    return bool(_WALLET_ID.match(addr))
+
+
+def is_bsv_address(addr):
+    addr = (addr or "").strip()
+    return bool(addr.startswith(("1", "3")) and 26 <= len(addr) <= 35
+                and all(c in _B58 for c in addr))
+
+
+def is_payout_dest(addr):
+    addr = (addr or "").strip()
+    return is_bsv_address(addr) or is_agentpay_wallet_id(addr)
+
+
+def validate_pay_address(addr):
+    """BSV receive address (legacy base58, 1/3) or public agentpay
+    wallet id (apw_… from GET /agent/me). Secret 64-hex wallet tokens
+    are refused so a leaked Bearer cannot become a pay address."""
+    addr = (addr or "").strip()
+    if is_agentpay_wallet_token(addr):
         raise GitError(
-            "refused: pay_address must be a bitcoin address the agent"
-            " can receive on (BSV, base58, starts with 1 or 3)")
-    return addr
+            "refused: pay_address looks like a secret wallet token; "
+            "pass the public wallet id (apw_… from GET /agent/me), "
+            "never the 64-hex token")
+    if is_bsv_address(addr) or is_agentpay_wallet_id(addr):
+        return addr
+    raise GitError(
+        "refused: pay_address must be a bitcoin address (BSV, base58,"
+        " starts with 1 or 3) or a public agentpay wallet id (apw_…)")
+
+
+def validate_agent_name(agent):
+    agent = (agent or "").strip()
+    if not agent:
+        raise GitError("refused: agent name is required")
+    if agent == AUTO_VERIFIER:
+        raise GitError("refused: agent name 'auto' is reserved"
+                       " for the automatic verifier")
+    return agent
 
 
 WORKER_SHARE = 0.80   # bounty fraction to the winning worker agent
@@ -128,7 +187,7 @@ async def post_task(store, spec, task_id=None):
 async def claim_task(store, artifacts, task_id, agent, pay_address=""):
     """Agent claims a task: exactly one claim per agent (DDL UNIQUE),
     mints a private Artifacts fork with a short-lived repo-scoped token."""
-    agent = (agent or "").strip() or "anon"
+    agent = validate_agent_name(agent)
     task = await store.get_task(task_id)
     if not task:
         raise GitError("refused: task not found")
@@ -197,7 +256,7 @@ async def submit_work(store, task_id, claim_id, agent, preview_url="", pay_addre
     if not (claim.get("pay_address") or "").strip():
         raise GitError(
             "refused: pay_address is required to complete a task"
-            " (bitcoin address the agent receives on)")
+            " (BSV address or public apw_ wallet id the agent receives on)")
     fork = await store.get_fork(claim["fork_id"])
     if not fork or fork["status"] != "working":
         raise GitError("refused: fork is not in working state")
@@ -217,10 +276,12 @@ async def submit_work(store, task_id, claim_id, agent, preview_url="", pay_addre
 # ---------------------------------------------------------------- verify
 
 async def attest_verification(store, fork_id, verifier, verdict,
-                              stake_sats=0, repro=""):
+                              stake_sats=0, repro="", evidence=None):
     """Verifier attests pass/fail on a fork. Stake is locked (dry-run).
     A fail verdict MUST include a repro (reproduce-to-release).
-    Returns {"ready_for_merge": bool} — first verified pass wins."""
+    Returns {"ready_for_merge": bool} — first verified pass wins.
+    evidence: optional dict recorded on the verification (auto-verify
+    stores test output + Clef ruling here)."""
     verifier = (verifier or "").strip() or "anon"
     fork = await store.get_fork(fork_id)
     if not fork:
@@ -248,6 +309,8 @@ async def attest_verification(store, fork_id, verifier, verdict,
         "repro": repro or "",
         "created_at": int(time.time()),
     }
+    if evidence:
+        verif["evidence"] = evidence
     await store.add_verification(verif)
     await store.ledger_add("stake_lock", fork["task_id"], verifier,
                            stake_sats,
@@ -329,10 +392,150 @@ async def record_merge(store, task_id, fork_id, audit_report, why_refs,
 
 # ---------------------------------------------------------------- settle
 
+def payout_idempotency_key(task_id, role, who=""):
+    who = (who or "").strip()
+    if who:
+        return f"swarmgit:{task_id}:{role}:{who}"[:120]
+    return f"swarmgit:{task_id}:{role}"[:120]
+
+
+async def _agent_pay_dest(store, agent):
+    getter = getattr(store, "agent_pay_address", None)
+    if not callable(getter):
+        return ""
+    try:
+        return (await getter(agent) or "").strip()
+    except Exception:
+        return ""
+
+
+def _paid_proof(settlement, txid=None, receipt_id=None):
+    """Normalize a paid send. Internal is a receipt, live is a BSV txid."""
+    settlement = (settlement or "").strip()
+    rid = (receipt_id or "").strip()
+    txid = (txid or "").strip()
+    if settlement == "internal":
+        rid = rid or txid
+        if not rid:
+            return None
+        return {"settlement": "internal", "receipt_id": rid, "txid": None}
+    if settlement == "live":
+        if not is_bsv_txid(txid):
+            return None
+        return {"settlement": "live", "txid": txid.lower(), "receipt_id": None}
+    return None
+
+
+async def _existing_paid(store, task_id, agent):
+    getter = getattr(store, "paid_payout", None)
+    if callable(getter):
+        try:
+            hit = await getter(task_id, agent)
+            if isinstance(hit, dict) and hit.get("settlement"):
+                return _paid_proof(hit.get("settlement"),
+                                   hit.get("txid"), hit.get("receipt_id"))
+        except Exception:
+            pass
+    getter = getattr(store, "live_payout_txid", None)
+    if not callable(getter):
+        return None
+    try:
+        existing = await getter(task_id, agent)
+    except Exception:
+        return None
+    if not existing:
+        return None
+    if is_agentpay_receipt_id(existing):
+        return _paid_proof("internal", receipt_id=existing)
+    if is_bsv_txid(existing):
+        return _paid_proof("live", txid=existing)
+    return None
+
+
+async def _send_payout(store, sender, task_id, agent, dest, sats, role, memo,
+                       live_mode):
+    """Send one payout. Never reports paid without a txid or receipt.
+
+    Returns (receipt_or_none, pending_reason). pending_reason set means
+    this send must not mark the task paid.
+    """
+    existing = await _existing_paid(store, task_id, agent)
+    if existing:
+        return ({"ok": True, "to": dest, "agent": agent, "sats": sats,
+                 "idempotent": True, **existing}, None)
+    if live_mode and dest and not is_payout_dest(dest):
+        await store.ledger_add(
+            "payout_skipped", task_id, agent, sats,
+            {"role": role, "to": dest, "reason": "dest is not a BSV address"
+             " or public apw_ wallet id", "settlement": "pending"})
+        return None, "invalid dest for live send"
+    key = payout_idempotency_key(task_id, role, agent)
+    try:
+        r = await sender.send(dest, sats, memo, key)
+    except Exception as e:
+        await store.ledger_add(
+            "payout_failed", task_id, agent, sats,
+            {"role": role, "to": dest, "error": str(e)[:300],
+             "idempotency_key": key, "settlement": "pending"})
+        return None, str(e)
+    settlement = (r.get("settlement") or "dry_run").strip()
+    if settlement in ("live", "internal"):
+        proof = _paid_proof(settlement, r.get("txid"), r.get("receipt_id"))
+        if not proof:
+            err = ("internal send returned no receipt" if settlement == "internal"
+                   else "live send returned no txid")
+            await store.ledger_add(
+                "payout_failed", task_id, agent, sats,
+                {"role": role, "to": dest, "error": err,
+                 "idempotency_key": key, "settlement": "pending"})
+            return None, err
+        settlement = proof["settlement"]
+        txid = proof.get("txid")
+        receipt_id = proof.get("receipt_id")
+    elif settlement == "dry_run":
+        txid = None
+        receipt_id = None
+    else:
+        await store.ledger_add(
+            "payout_failed", task_id, agent, sats,
+            {"role": role, "to": dest,
+             "error": "unknown settlement %s" % settlement,
+             "idempotency_key": key, "settlement": "pending"})
+        return None, "unknown settlement"
+    detail = {"role": role, "pay_address": dest,
+              "settlement": settlement, "idempotency_key": key}
+    if settlement == "live" and txid:
+        detail["txid"] = txid
+    if settlement == "internal" and receipt_id:
+        detail["receipt_id"] = receipt_id
+    receipt = {"to": dest, "agent": agent, "sats": sats,
+               "settlement": settlement, "txid": txid,
+               "receipt_id": receipt_id}
+    await store.ledger_add("payout", task_id, agent, sats, detail)
+    return receipt, None
+
+
+def _winner_paid(payouts, winner):
+    for p in payouts:
+        if p.get("agent") != winner:
+            continue
+        if p.get("settlement") == "live" and p.get("txid"):
+            return p
+        if p.get("settlement") == "internal" and (p.get("receipt_id") or p.get("txid")):
+            return p
+    return None
+
+
 async def settle_task(store, sender, task_id, idempotency_key=""):
-    """DRY-RUN settlement: escrow release + payouts recorded in the
-    ledger via the Sender interface. No funds move: DryRunSender is the
-    only implementation until Richard's POST /agent/send exists."""
+    """Release escrow to the winner (and passing verifiers).
+
+    DryRunSender: local ledger only, task becomes settled, no txid.
+    Paying sender: task becomes settled only when the winner payout has
+    a BSV txid (settlement=live) or an agentpay receipt (settlement=
+    internal). A failing or empty send leaves the task merging and the
+    release pending. Repeating settle with the same keys will not
+    double-pay (ledger receipt/txid short-circuit + agentpay idempotency).
+    """
     task = await store.get_task(task_id)
     if not task:
         raise GitError("refused: task not found")
@@ -347,51 +550,78 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     winner_claim = await store.get_claim(winner_fork["claim_id"])
     winner = winner_claim["agent"]
     dest = (winner_claim.get("pay_address") or "").strip()
+    already = await _existing_paid(store, task_id, winner)
+    if already:
+        task["status"] = "settled"
+        await store.put_task(task)
+        return {"ok": True, "task_id": task_id, "dry_run": False,
+                "funds_moved": True, "pending": False,
+                "bounty_sats": int(task["bounty_sats"]),
+                "funding_txid": task.get("funding_txid", ""),
+                "winner": winner,
+                "payouts": [{"to": dest, "agent": winner,
+                             "sats": int(task["bounty_sats"]),
+                             "idempotent": True, **already}],
+                "note": "idempotent: payout already recorded"}
     if not dest:
         raise GitError(
             "refused: winning agent has no pay address — agents must"
             " provide one when they complete the task")
     verifs = await store.verifications_for_fork(winner_fork_id)
     passing = sorted({v["verifier"] for v in verifs
-                      if v.get("verdict") == "pass"})
+                      if v.get("verdict") == "pass"
+                      and v.get("verifier") != AUTO_VERIFIER})
     bounty = int(task["bounty_sats"])
-    worker_sats, verifier_sats = split_bounty(bounty, passing)
+    if passing:
+        worker_sats, verifier_sats = split_bounty(bounty, passing)
+    else:
+        worker_sats, verifier_sats = bounty, {}
+    live_mode = getattr(sender, "settlement_mode", "dry_run") == "live"
     payouts = []
-    r = await sender.send(dest, worker_sats,
-                          f"swarmgit bounty: {task_id} winner")
-    payouts.append({"to": dest, "agent": winner, "sats": worker_sats,
-                    "settlement": r.get("settlement", "dry_run"),
-                    "txid": r.get("txid")})
-    settlement = r.get("settlement", "dry_run")
-    await store.ledger_add("payout", task_id, winner, worker_sats,
-                           {"role": "winner", "pay_address": dest,
-                            "funding_txid": task.get("funding_txid", ""),
-                            "escrow_address": task.get("escrow_address", ""),
-                            "settlement": settlement,
-                            "txid": r.get("txid")})
+    r, pending = await _send_payout(
+        store, sender, task_id, winner, dest, worker_sats, "winner",
+        f"swarmgit bounty: {task_id} winner", live_mode)
+    if r:
+        r["funding_txid"] = task.get("funding_txid", "")
+        payouts.append(r)
     for v, sats in verifier_sats.items():
-        rv = await sender.send(v, sats, f"swarmgit verifier: {task_id}")
-        payouts.append({"to": v, "sats": sats,
-                        "settlement": rv.get("settlement", "dry_run"),
-                        "txid": rv.get("txid")})
-        await store.ledger_add("payout", task_id, v, sats,
-                               {"role": "verifier", "settlement": "dry_run",
-                                "txid": rv.get("txid")})
+        vdest = await _agent_pay_dest(store, v) or v
+        rv, _vpend = await _send_payout(
+            store, sender, task_id, v, vdest, sats, "verifier",
+            f"swarmgit verifier: {task_id}", live_mode)
+        if rv:
+            payouts.append(rv)
+    if pending and live_mode:
+        return {"ok": False, "pending": True, "task_id": task_id,
+                "funds_moved": False, "dry_run": False,
+                "bounty_sats": bounty,
+                "funding_txid": task.get("funding_txid", ""),
+                "winner": winner, "payouts": payouts,
+                "error": pending,
+                "note": "release pending — send did not return a"
+                        " txid or receipt; not marked paid"}
+    paid = _winner_paid(payouts, winner)
+    settlement = (paid or {}).get("settlement") or "dry_run"
     await store.ledger_add("escrow_release", task_id, task["poster"],
                            bounty,
                            {"note": "escrow released to payouts",
-                            "settlement": "dry_run"})
+                            "settlement": settlement})
     await store.bump_reputation(winner, score=10, tasks_won=1)
     task["status"] = "settled"
     await store.put_task(task)
-    live = any(p.get("settlement") == "live" for p in payouts)
-    return {"ok": True, "task_id": task_id, "dry_run": not live,
-            "funds_moved": live, "bounty_sats": bounty,
+    if settlement == "live":
+        note = "live settlement (on-chain BSV tx)"
+    elif settlement == "internal":
+        note = "internal settlement (agentpay receipt, not a BSV tx)"
+    else:
+        note = ("DRY-RUN. Ledger entries are local accounting."
+                " Live sats move via AgentPaySender or the"
+                " walletd puller.")
+    return {"ok": True, "task_id": task_id, "dry_run": paid is None,
+            "funds_moved": paid is not None, "bounty_sats": bounty,
             "funding_txid": task.get("funding_txid", ""),
             "winner": winner, "payouts": payouts,
-            "note": "DRY-RUN ONLY. Ledger entries above are local"
-                    " accounting. Live sats move only via Richard's"
-                    " POST /agent/send primitive — not wired yet."}
+            "pending": False, "note": note}
 
 
 # ---------------------------------------------------------------- expiry

@@ -352,9 +352,12 @@ async def main():
           {"task_posted", "attempt", "verification", "rationale",
            "decision"} <= kinds)
     ledger = await store.ledger_for_task(task_id)
-    check("every ledger event dry_run",
-          all(e["settlement"] == "dry_run" for e in ledger))
+    check("no live settlement without a txid",
+          all(e["settlement"] != "live" or (e.get("detail") or {}).get("txid")
+              for e in ledger))
     payouts = [e for e in ledger if e["kind"] == "payout"]
+    check("payouts are dry_run",
+          all(e["settlement"] == "dry_run" for e in payouts))
     by_agent = {e["agent"]: e["sats"] for e in payouts}
     check("winner gets 80%", by_agent.get("agent_b") == 8000)
     check("verifier gets 20%", by_agent.get("verifier_v") == 2000)

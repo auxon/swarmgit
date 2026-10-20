@@ -238,6 +238,9 @@ async def main():
     check("B1: verifier marker", "verifier_board" in body)
     check("B1: gate mode shown", "gate mode:" in body)
     check("B1: bounty shown", "9,000 sats" in body)
+    check("B1: settlement section", "Settlement" in body)
+    check("B1: dry-run payouts have no WhatsOnChain",
+          "whatsonchain.com" not in body)
 
     # -- B2: redaction --------------------------------------------------
     check("B2: token last4 shown", last4 in body)

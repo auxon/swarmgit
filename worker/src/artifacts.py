@@ -110,6 +110,36 @@ class ArtifactsBackend:
         except Exception as e:
             raise ArtifactsError(f"read_file failed: {e}")
 
+    async def list_files(self, repo_name, ref="main"):
+        """List file paths at a ref. Returns [] if the binding cannot."""
+        try:
+            repo = await self._b.get(repo_name)
+            for meth in ("listFiles", "list", "ls"):
+                fn = getattr(repo, meth, None)
+                if not callable(fn):
+                    continue
+                try:
+                    listing = await fn(_js_opts({"ref": ref}))
+                except TypeError:
+                    listing = await fn(ref)
+                paths = []
+                items = listing
+                if isinstance(listing, dict):
+                    items = listing.get("files") or listing.get("entries") or []
+                for item in items or []:
+                    if isinstance(item, str):
+                        paths.append(item)
+                    elif isinstance(item, dict) and item.get("path"):
+                        paths.append(str(item["path"]))
+                    else:
+                        p = _s(item, "path", "name")
+                        if p:
+                            paths.append(p)
+                return paths
+        except Exception:
+            return []
+        return []
+
     async def issue_token(self, repo_name, ttl_s=86400, scope="write"):
         """Issue a short-lived repo-scoped Git token. Agents get
         "write" (they must push); verifiers/auditors get "read"."""
@@ -168,6 +198,12 @@ class FakeArtifacts(ArtifactsBackend):
         if repo is None:
             raise ArtifactsError(f"repo not found: {repo_name}")
         return repo["files"].get(path)
+
+    async def list_files(self, repo_name, ref="main"):
+        repo = self.repos.get(repo_name)
+        if repo is None:
+            raise ArtifactsError(f"repo not found: {repo_name}")
+        return list(repo["files"].keys())
 
     async def issue_token(self, repo_name, ttl_s=3600):
         if repo_name not in self.repos:

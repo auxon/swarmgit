@@ -39,6 +39,16 @@ GOOGLE_CLIENT_ID = "589184184131-nde7o3bidmnnema7ksll8hsov79u7h4e.apps.googleuse
 # BSV receive address shown on /board with a QR. Not a secret.
 # Empty hides the QR and says so. Set a real address before the demo.
 SWARMSGIT_PAY_ADDRESS = ""
+# Auto-verify: run acceptance tests + Clef review on submit when the
+# bounty is at or below this (sats). Above it, only staked human/agent
+# verifiers count. 0 disables auto-verify.
+AUTO_VERIFY = "1"
+AUTO_VERIFY_MAX_SATS = "10000"
+# Live settlement. Off by default. Flip to "1" AND wrangler secret put
+# AGENTPAY_KEY (agp_…) to wire AgentPaySender. DryRunSender is used
+# until both are set. Do not commit the key.
+SWARMSGIT_LIVE_SETTLEMENT = "0"
+AGENTPAY_URL = "https://entangleit.com/api/agentpay"
 # Shared secret for the outbound release puller. Not a WIF.
 #   printf %s "$(openssl rand -hex 32)" | wrangler secret put SWARMSGIT_WALLETD_TOKEN
 # The daemon dials out. Do not publish a tunnel to send.
@@ -81,6 +91,22 @@ max_retries = 3
 binding = "ARTIFACTS"
 namespace = "swarmgit"
 
-# Workers AI: Clef decision model arbitrates disputes (src/arbiter.py).
+# Workers AI: Clef decision model arbitrates disputes and auto-verify
+# reviews (src/arbiter.py, src/autoverify.py).
 [ai]
 binding = "AI"
+
+# Optional isolated test runner (Cloudflare Containers). Uncomment and
+# add a Dockerfile to exec untrusted acceptance_tests.py inside a
+# microVM. Without this binding, auto-verify uses the Preview HTTP
+# runner and defers when the protocol is unknown — never default-allows.
+# [[durable_objects.bindings]]
+# name = "SANDBOX"
+# class_name = "VerifySandbox"
+# [[migrations]]
+# tag = "v1-sandbox"
+# new_sqlite_classes = ["VerifySandbox"]
+# [[containers]]
+# class_name = "VerifySandbox"
+# image = "./Dockerfile"
+# max_instances = 5

@@ -265,9 +265,10 @@ def _pay_panel(address, sats=0):
         '<p class="task-meta">Pay the bounty here when you post the task. '
         'It stays in escrow until a fork merges. The agent address is '
         'where escrow releases, not where you pay now. Ledger settlement '
-        'is dry-run until SWARMSGIT_LIVE_SETTLEMENT + AGENTPAY_KEY, or the'
-        ' walletd puller, posts a BSV txid (P2PKH) or an agentpay receipt'
-        ' (public apw_ dest).</p>'
+        'is dry-run until live settlement is fully armed (flag + agentpay'
+        ' key + every spend cap) and the pause is off. The walletd puller'
+        ' is the other live path. A BSV txid (P2PKH) or an agentpay receipt'
+        ' (public apw_ dest) is required to mark paid.</p>'
         '<p class="mono addr" id="sg-escrow-addr">%s</p>'
         '<p class="mono">%s</p></div></div>' % (_qr_svg(uri), _e(address), _e(uri)))
 
@@ -355,7 +356,160 @@ def _disputes_section(disputes):
         '<p class="task-meta">An upheld dispute is a bad dispute: '
         'the disputer is slashed (dry-run ledger + false report).</p>')
 
-async def render(store, pay_address=""):
+def _cap_label(n):
+    if n is None:
+        return "unconfigured"
+    return "{:,} sats".format(int(n))
+
+
+def _spend_panel(spend):
+    """Pause, caps, usage, pending approvals. Never secrets."""
+    spend = spend or {}
+    paused = bool(spend.get("paused"))
+    armed = bool(spend.get("live_armed"))
+    missing = spend.get("missing") or []
+    pending = spend.get("pending_approvals") or []
+    state = "PAUSED" if paused else ("LIVE ARMED" if armed else "DRY-RUN")
+    badge = _badge(state, "st-bad" if paused else (
+        "st-open" if armed else "st-warn"))
+    missing_html = ""
+    if missing:
+        missing_html = (
+            '<p class="task-meta">Live settlement needs: '
+            + ", ".join('<span class="mono">%s</span>' % _e(m)
+                        for m in missing)
+            + ". Flipping SWARMSGIT_LIVE_SETTLEMENT=1 alone is not enough."
+              "</p>")
+    rows = (
+        "<tr><td>per-payout cap</td><td class=\"mono\">%s</td></tr>"
+        "<tr><td>daily cap</td><td class=\"mono\">%s"
+        " (used %s)</td></tr>"
+        "<tr><td>7-day cap</td><td class=\"mono\">%s"
+        " (used %s)</td></tr>"
+        "<tr><td>per-agent daily cap</td><td class=\"mono\">%s</td></tr>"
+        "<tr><td>approval threshold</td><td class=\"mono\">%s</td></tr>" % (
+            _e(_cap_label(spend.get("payout_cap_sats"))),
+            _e(_cap_label(spend.get("daily_cap_sats"))),
+            _e("{:,}".format(int(spend.get("released_today_sats") or 0))),
+            _e(_cap_label(spend.get("weekly_cap_sats"))),
+            _e("{:,}".format(int(spend.get("released_7d_sats") or 0))),
+            _e(_cap_label(spend.get("agent_daily_cap_sats"))),
+            _e(_cap_label(spend.get("approval_threshold_sats"))),
+        )
+    )
+    env_note = ""
+    if spend.get("env_paused"):
+        env_note = ('<p class="task-meta">Hard pause: '
+                    '<span class="mono">SWARMSGIT_PAUSED</span> is on.</p>')
+    appr = ""
+    if pending:
+        items = "".join(
+            '<tr><td class="mono">%s</td><td><strong>%s</strong></td>'
+            '<td class="mono">%s sats</td></tr>' % (
+                _e(a.get("task_id")), _e(a.get("agent")),
+                _e("{:,}".format(int(a.get("sats") or 0))))
+            for a in pending)
+        appr = (
+            '<h3>Pending payout approvals</h3>'
+            '<table><tr><th>task</th><th>agent</th><th>sats</th></tr>'
+            + items + "</table>")
+    else:
+        appr = '<p class="task-meta">No payouts waiting on approval.</p>'
+    return (
+        '<div class="card" id="sg-spend">'
+        '<h2 style="margin-top:0">Spend controls %s</h2>'
+        '<p class="task-meta">Kill switch and caps. Operator pause via MCP'
+        ' <span class="mono">set_pause</span> or POST /admin/pause. Caps are'
+        ' wrangler vars; empty is unconfigured (not zero).</p>'
+        '%s%s'
+        '<table><tr><th>limit</th><th>value</th></tr>%s</table>'
+        '%s'
+        '%s'
+        '</div>' % (badge, missing_html, env_note, rows, appr,
+                     _spend_forms(pending))
+    )
+
+
+_SPEND_JS = r"""
+<script>
+(function(){
+function hdrs(){var h={'Content-Type':'application/json'};
+var b='';try{b=sessionStorage.getItem('sg_bearer')||'';}catch(e){}
+var sess='';try{sess=sessionStorage.getItem('sg_session')||'';}catch(e){}
+if(b)h['Authorization']='Bearer '+b;else if(sess)h['Authorization']='Bearer '+sess;
+var inp=document.getElementById('sg-bearer');if(inp&&inp.value)h['Authorization']='Bearer '+inp.value.trim();
+return h;}
+async function call(name,args,outId){
+var out=document.getElementById(outId);if(out){out.className='sg-out';out.textContent='working...';}
+var body={jsonrpc:'2.0',id:1,method:'tools/call',params:{name:name,arguments:args}};
+try{var r=await fetch('mcp',{method:'POST',credentials:'same-origin',headers:hdrs(),body:JSON.stringify(body)});
+var j=await r.json();
+var t=j&&j.result&&j.result.content&&j.result.content[0]&&j.result.content[0].text;
+var p=t?JSON.parse(t):{ok:false,error:(j&&j.error&&j.error.message)||('HTTP '+r.status)};
+if(p.ok){if(out){out.className='sg-out sg-ok';out.textContent='ok — reload.';}}
+else{if(out){out.className='sg-out sg-err';out.textContent='refused: '+(p.error||'unknown');}}
+}catch(e){if(out){out.className='sg-out sg-err';out.textContent='network error: '+e;}}
+}
+var pf=document.getElementById('sg-pause-form');
+if(pf)pf.addEventListener('submit',function(ev){ev.preventDefault();
+var v=document.getElementById('sg-pause-val').value==='1';
+call('set_pause',{paused:v,operator:(document.getElementById('sg-pause-op').value||'operator')},'sg-pause-out');});
+var af=document.getElementById('sg-approve-form');
+if(af)af.addEventListener('submit',function(ev){ev.preventDefault();
+var sel=document.getElementById('sg-appr-sel').value||'';
+var parts=sel.split('\t');
+call('approve_payout',{task_id:parts[0]||'',agent:parts[1]||'',
+approve:document.getElementById('sg-appr-ruling').value==='approve',
+operator:(document.getElementById('sg-appr-op').value||'operator'),
+note:(document.getElementById('sg-appr-note').value||'')},'sg-appr-out');});
+})();
+</script>
+"""
+
+
+def _spend_forms(pending):
+    pause = (
+        '<form id="sg-pause-form" class="sg-form" autocomplete="off">'
+        '<div class="row"><div><label>Kill switch</label>'
+        '<select id="sg-pause-val" required style="width:100%;background:#0b0e14;'
+        'border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px">'
+        '<option value="1">pause — freeze claims and releases</option>'
+        '<option value="0">resume</option></select></div>'
+        '<div><label>Operator</label>'
+        '<input id="sg-pause-op" maxlength="40" placeholder="richard"></div></div>'
+        '<button type="submit">Apply pause</button>'
+        '<div id="sg-pause-out" class="sg-out" aria-live="polite"></div></form>'
+    )
+    if not pending:
+        return pause + _SPEND_JS
+    opts = "".join(
+        '<option value="%s\t%s">%s / %s / %s sats</option>' % (
+            _e(a.get("task_id")), _e(a.get("agent")),
+            _e(a.get("task_id")), _e(a.get("agent")),
+            _e("{:,}".format(int(a.get("sats") or 0))))
+        for a in pending)
+    appr = (
+        '<form id="sg-approve-form" class="sg-form" autocomplete="off">'
+        '<label>Pending payout</label>'
+        '<select id="sg-appr-sel" required style="width:100%;background:#0b0e14;'
+        'border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px">'
+        + opts + '</select>'
+        '<div class="row"><div><label>Decision</label>'
+        '<select id="sg-appr-ruling" required style="width:100%;background:#0b0e14;'
+        'border:1px solid #232a3a;border-radius:8px;color:#e6e9f0;padding:9px 12px">'
+        '<option value="approve">approve — allow this payout</option>'
+        '<option value="reject">reject</option></select></div>'
+        '<div><label>Operator</label>'
+        '<input id="sg-appr-op" maxlength="40" placeholder="richard"></div></div>'
+        '<label>Note</label>'
+        '<textarea id="sg-appr-note" maxlength="300" placeholder="why"></textarea>'
+        '<button type="submit">Decide payout</button>'
+        '<div id="sg-appr-out" class="sg-out" aria-live="polite"></div></form>'
+    )
+    return pause + appr + _SPEND_JS
+
+
+async def render(store, pay_address="", spend=None):
     """Build the full board page. Read-only: store reads only."""
     tasks = await store.list_tasks()
     cards = []
@@ -390,6 +544,7 @@ async def render(store, pay_address=""):
 <h2>🏆 Leaderboard</h2>
 {_leaderboard_table(lb)}
 {_pay_panel(pay_address, pay_sats)}
+{_spend_panel(spend)}
 {_POST_FORM}
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>

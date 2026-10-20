@@ -25,10 +25,11 @@ from sender import choose_sender  # noqa: E402
 import autoverify as autoverify_mod  # noqa: E402
 import board as board_mod  # noqa: E402
 import auth as auth_mod  # noqa: E402
+import spendctl as spendctl_mod  # noqa: E402
 
-# Optional Durable Object export. Unbound unless wrangler.toml adds a
-# SANDBOX binding (+ [[containers]] image). Auto-verify defers when the
-# container is missing; it never default-allows.
+# Durable Object export for the isolated auto-verify container.
+# Bound by wrangler.toml SANDBOX + [[containers]]. Auto-verify defers
+# when the container is missing; it never default-allows.
 VerifySandbox = autoverify_mod.VerifySandbox
 
 JSON = {"Content-Type": "application/json"}
@@ -116,6 +117,7 @@ class Default(WorkerEntrypoint):
             "sender": self._sender(),
             "walletd_url": self._walletd_url(),
             "ai": ai,
+            "env": self.env,
             "sandbox": autoverify_mod.sandbox_from_env(self.env),
             **self._auto_verify_deps(),
         }
@@ -172,7 +174,9 @@ class Default(WorkerEntrypoint):
                            or "").strip()
                 except Exception:
                     pay = ""
-                page = await board_mod.render(store, pay_address=pay)
+                spend = await spendctl_mod.snapshot(self.env, store)
+                page = await board_mod.render(
+                    store, pay_address=pay, spend=spend)
             except Exception:
                 return Response("board unavailable", status=503,
                                 headers={"Content-Type": "text/plain"})
@@ -250,6 +254,60 @@ class Default(WorkerEntrypoint):
                  "session": sid}), headers={
                 **JSON,
                 "Set-Cookie": auth_mod.session_cookie_header(sid)})
+
+        if path == "/admin/spend" and method == "GET":
+            if not await self._authed(request):
+                return Response(json.dumps({"error": "unauthorized"}),
+                                status=401, headers=JSON)
+            store = await self._db()
+            snap = await spendctl_mod.snapshot(self.env, store)
+            return Response(json.dumps({"ok": True, **snap}), headers=JSON)
+
+        if path == "/admin/pause" and method == "POST":
+            if not await self._authed(request):
+                return Response(json.dumps({"error": "unauthorized"}),
+                                status=401, headers=JSON)
+            try:
+                body = _to_py(await request.json()) or {}
+            except Exception:
+                return Response(json.dumps({"error": "parse error"}),
+                                status=400, headers=JSON)
+            paused = body.get("paused")
+            if not isinstance(paused, bool):
+                return Response(json.dumps(
+                    {"error": "paused must be a boolean"}),
+                    status=400, headers=JSON)
+            store = await self._db()
+            out = await spendctl_mod.set_paused(
+                store, paused, body.get("operator") or "operator")
+            return Response(json.dumps(out), headers=JSON)
+
+        if path == "/admin/approve" and method == "POST":
+            if not await self._authed(request):
+                return Response(json.dumps({"error": "unauthorized"}),
+                                status=401, headers=JSON)
+            try:
+                body = _to_py(await request.json()) or {}
+            except Exception:
+                return Response(json.dumps({"error": "parse error"}),
+                                status=400, headers=JSON)
+            task_id = (body.get("task_id") or "").strip()
+            agent = (body.get("agent") or "").strip()
+            approve = body.get("approve")
+            if not task_id or not agent or not isinstance(approve, bool):
+                return Response(json.dumps(
+                    {"error": "task_id, agent, approve=bool required"}),
+                    status=400, headers=JSON)
+            store = await self._db()
+            try:
+                out = await spendctl_mod.decide_approval(
+                    store, task_id, agent, approve,
+                    body.get("operator") or "operator",
+                    body.get("note") or "")
+            except Exception as ex:
+                return Response(json.dumps({"ok": False, "error": str(ex)}),
+                                status=400, headers=JSON)
+            return Response(json.dumps(out), headers=JSON)
 
         if path != "/mcp" or method != "POST":
             return Response(json.dumps({"error": "not found"}),
@@ -425,6 +483,7 @@ class Default(WorkerEntrypoint):
             "sender": self._sender(),
             "walletd_url": self._walletd_url(),
             "ai": ai,
+            "env": self.env,
             "sandbox": autoverify_mod.sandbox_from_env(self.env),
             **self._auto_verify_deps(),
         }

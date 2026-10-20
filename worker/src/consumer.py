@@ -30,6 +30,7 @@ import arbiter
 import autoverify
 import gitlib
 import merge_gate
+import spendctl
 import whygraph
 
 # Subrequest budget per merge-gate invocation (Worker limit is 1000).
@@ -129,14 +130,25 @@ async def _on_merge(store, deps, msg):
     # -- watch the funding tx again, then broadcast the release ------
     try:
         import chain
+        env = deps.get("env")
+        if await spendctl.is_paused(env, store):
+            await store.ledger_add(
+                "payout_blocked", task_id, "", 0,
+                {"code": "paused",
+                 "reason": "SwarmGit is paused — releases are frozen",
+                 "fork_id": fork_id, "settlement": "pending"})
+            return
         task = await store.get_task(task_id)
         if task and task.get("funding_txid"):
             await chain.confirm_funding(
                 deps["http"], task["funding_txid"],
                 task.get("escrow_address") or "", task.get("bounty_sats") or 0)
-        settled = await gitlib.settle_task(store, deps["sender"], task_id)
+        settled = await gitlib.settle_task(
+            store, deps["sender"], task_id, env=env)
         if settled.get("funds_moved"):
             return  # txid or internal receipt recorded; no puller needed
+        if settled.get("block_code") in spendctl.NO_PULLER_CODES:
+            return  # pause / cap / approval — never a walletd pull
         payout = next((p for p in settled.get("payouts") or []
                        if p.get("agent")), None)
         dest = (payout or {}).get("to") or ""

@@ -160,3 +160,22 @@ CREATE TABLE IF NOT EXISTS agent_keys (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sgagent_hash ON agent_keys(token_hash);
+
+CREATE TABLE IF NOT EXISTS meta (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS payout_approvals (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  sats INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  operator TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(task_id, agent)
+);
+CREATE INDEX IF NOT EXISTS idx_sgappr_status ON payout_approvals(status);

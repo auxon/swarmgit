@@ -41,9 +41,10 @@ contest will be workflow plumbing; SwarmGit is a coordination
 *economy*.
 
 **What it is not:** not a GitHub UI clone; not a CI system. Settlement
-is dry-run until `SWARMSGIT_LIVE_SETTLEMENT` and `AGENTPAY_KEY` are
-set (same discipline as TestSwarm's `settle_job` and PreFlight billing
-— live send is behind a flag, never accidental).
+is dry-run until live settlement is fully armed: flag + agentpay key
++ every spend cap, pause off (same discipline as TestSwarm's
+`settle_job` and PreFlight billing — live send is behind a flag,
+never accidental).
 
 ---
 
@@ -244,6 +245,15 @@ Honor agentpay `settlement` (`live` BSV txid vs `internal` snd_
 receipt). Walletd puller kept as the other path. Never mark paid
 without a txid or receipt.
 
+**Follow-up (this branch):** isolated auto-verify in a Cloudflare
+Container (`VerifySandbox` + `worker/Dockerfile`, clone with a
+short-lived read token, tests under `unshare --net` with CPU/time/
+memory limits). Infra failure defers. Spend controls (global pause,
+per-payout / daily / 7-day / per-agent caps, approval threshold) are
+required before live settlement can arm — flipping
+`SWARMSGIT_LIVE_SETTLEMENT=1` alone is not enough even though
+`AGENTPAY_AGENT_KEY` exists in prod. Caps and pause are on `/board`.
+
 ---
 
 ## 6. Submission checklist
@@ -263,10 +273,11 @@ without a txid or receipt.
    agents run by us — still real, less impressive.
 2. **Settlement in the demo:** dry-run ledger is still the default.
    AgentPay now has `POST /agent/send` (Bearer `agp_…`, idempotency
-   key, txid). SwarmGit wires `AgentPaySender` behind
-   `SWARMSGIT_LIVE_SETTLEMENT` + `AGENTPAY_KEY`. `apw_…` dests are
-   public wallet ids (auxon/agentpay#7); secret 64-hex tokens are
-   refused. Internal sends record a receipt, not a BSV tx.
+   key, txid). SwarmGit wires `AgentPaySender` behind fully-armed live
+   settlement (flag + `AGENTPAY_KEY`/`AGENTPAY_AGENT_KEY` + every spend
+   cap, pause off). `apw_…` dests are public wallet ids
+   (auxon/agentpay#7); secret 64-hex tokens are refused. Internal
+   sends record a receipt, not a BSV tx.
 3. **Repo home + name** for the entry (public, MIT).
 4. **Workers Paid plan:** does his Cloudflare account have it?
    (Required for the Artifacts open beta. Workers AI must also be on

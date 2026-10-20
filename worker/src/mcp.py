@@ -16,6 +16,7 @@ import time
 
 import gitlib
 from gitlib import GitError, nid
+import spendctl
 import whygraph
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -24,9 +25,11 @@ SERVER_VERSION = "0.1.0"
 
 DRY_RUN = ("Settlement is dry-run by default (DryRunSender). Live sats"
            " move only when SWARMSGIT_LIVE_SETTLEMENT is on AND"
-           " AGENTPAY_KEY is set, or via the walletd puller, and only"
-           " with a returned BSV txid (P2PKH dest) or agentpay receipt"
-           " (public apw_ dest). This tool cannot move funds itself.")
+           " AGENTPAY_KEY/AGENTPAY_AGENT_KEY is set AND every spend cap"
+           " is configured, or via the walletd puller, and only with a"
+           " returned BSV txid (P2PKH dest) or agentpay receipt"
+           " (public apw_ dest). Pause and caps gate releases. This"
+           " tool cannot move funds itself.")
 
 
 def _req_int(args, name, minimum=0):
@@ -247,6 +250,50 @@ TOOLS = [
         },
     },
     {
+        "name": "get_spend_controls",
+        "description": (
+            "Operator view of the kill switch and spend caps: pause"
+            " state, configured limits, usage today / 7d, pending"
+            " payout approvals, and what is still missing before live"
+            " settlement can arm. Never returns secrets. Read-only."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_pause",
+        "description": (
+            "Operator kill switch. paused=true freezes new claims,"
+            " auto-verify payouts, and releases until resumed."
+            " Persisted in D1 (toggle without redeploy). Env"
+            " SWARMSGIT_PAUSED=1 is a hard pause that this tool cannot"
+            " override. " + DRY_RUN),
+        "inputSchema": {
+            "type": "object",
+            "required": ["paused"],
+            "properties": {
+                "paused": {"type": "boolean"},
+                "operator": {"type": "string", "default": "operator"},
+            },
+        },
+    },
+    {
+        "name": "approve_payout",
+        "description": (
+            "Operator approve or reject a payout that sat above"
+            " SWARMSGIT_APPROVAL_THRESHOLD_SATS. approve=true lets the"
+            " next settle_task send; false rejects it. " + DRY_RUN),
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id", "agent", "approve"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "agent": {"type": "string"},
+                "approve": {"type": "boolean"},
+                "operator": {"type": "string", "default": "operator"},
+                "note": {"type": "string", "default": ""},
+            },
+        },
+    },
+    {
         # Human close of a Clef deferral. Same outcomes as a ruling,
         # including the slash on a bad (upheld) dispute.
         "name": "close_dispute",
@@ -392,6 +439,12 @@ async def _call_tool(store, deps, name, args):
         return await _dispute_fork(store, deps, args)
     if name == "close_dispute":
         return await _close_dispute(store, deps, args)
+    if name == "get_spend_controls":
+        return await _get_spend_controls(store, deps, args)
+    if name == "set_pause":
+        return await _set_pause(store, deps, args)
+    if name == "approve_payout":
+        return await _approve_payout(store, deps, args)
     raise GitError(f"unknown tool: {name}")  # unreachable
 
 
@@ -462,7 +515,7 @@ async def _claim_task(store, deps, args):
         raise GitError("refused: task_id and agent are required")
     res = await gitlib.claim_task(
         store, deps["artifacts"], task_id, agent,
-        args.get("pay_address", ""))
+        args.get("pay_address", ""), env=deps.get("env"))
     token = res.pop("_token")
     result = {"ok": True, "claim_id": res["claim_id"],
               "fork_id": res["fork_id"], "repo_name": res["repo_name"],
@@ -616,6 +669,40 @@ async def _close_dispute(store, deps, args):
               **outcome}
     await store.idem_put(key, "close_dispute", result)
     return result
+
+
+async def _get_spend_controls(store, deps, args):
+    env = deps.get("env")
+    snap = await spendctl.snapshot(env, store)
+    return {"ok": True, **snap}
+
+
+async def _set_pause(store, deps, args):
+    paused = args.get("paused")
+    if not isinstance(paused, bool):
+        raise GitError("refused: paused must be a boolean")
+    operator = (args.get("operator") or deps.get("actor")
+                or "operator").strip() or "operator"
+    return await spendctl.set_paused(store, paused, operator)
+
+
+async def _approve_payout(store, deps, args):
+    task_id = (args.get("task_id") or "").strip()
+    agent = (args.get("agent") or "").strip()
+    approve = args.get("approve")
+    if not task_id or not agent:
+        raise GitError("refused: task_id and agent are required")
+    if not isinstance(approve, bool):
+        raise GitError("refused: approve must be a boolean")
+    operator = (args.get("operator") or deps.get("actor")
+                or "operator").strip() or "operator"
+    try:
+        return await spendctl.decide_approval(
+            store, task_id, agent, approve, operator,
+            args.get("note") or "")
+    except RuntimeError as e:
+        raise GitError("refused: " + str(e))
+
 
 async def _register_agent(store, args):
     agent = (args.get("agent") or "").strip()

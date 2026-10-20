@@ -7,7 +7,7 @@
 #
 # Deploy checklist (run once, in order):
 #   1. Cloudflare account must have the Workers Paid plan
-#      (Artifacts open beta requirement).
+#      (Artifacts + Containers requirement).
 #   2. wrangler d1 create swarmgit
 #      -> paste the returned database_id below (replacing REPLACE-ME)
 #   3. wrangler d1 execute swarmgit --remote --file=src/schema.sql
@@ -17,6 +17,10 @@
 #      current docs at deploy time — it is beta.
 #   6. printf %s '<token>' | wrangler secret put SWARMSGIT_BEARER
 #      (generate with: python3 -c "import secrets; print(secrets.token_hex(32))")
+#   6b. First deploy builds ./Dockerfile and applies migration v1-sandbox.
+#   6c. Do not set SWARMSGIT_LIVE_SETTLEMENT=1 until every
+#      SWARMSGIT_*_CAP_SATS var is a number. AGENTPAY_AGENT_KEY may
+#      already exist in prod.
 #   7. wrangler deploy
 #
 # Local dev (no account changes):
@@ -44,10 +48,17 @@ SWARMSGIT_PAY_ADDRESS = ""
 # verifiers count. 0 disables auto-verify.
 AUTO_VERIFY = "1"
 AUTO_VERIFY_MAX_SATS = "10000"
-# Live settlement. Off by default. Flip to "1" AND wrangler secret put
-# AGENTPAY_KEY (agp_…) to wire AgentPaySender. DryRunSender is used
-# until both are set. Do not commit the key.
+# Live settlement. Off by default. Flip to "1" is NOT enough: every
+# cap below must also be set (empty is unconfigured; 0 is a real cap)
+# AND AGENTPAY_KEY or AGENTPAY_AGENT_KEY (agp_…) must exist. Pause
+# (SWARMSGIT_PAUSED or MCP set_pause) freezes claims and releases.
 SWARMSGIT_LIVE_SETTLEMENT = "0"
+SWARMSGIT_PAUSED = "0"
+SWARMSGIT_PAYOUT_CAP_SATS = ""
+SWARMSGIT_DAILY_CAP_SATS = ""
+SWARMSGIT_WEEKLY_CAP_SATS = ""
+SWARMSGIT_AGENT_DAILY_CAP_SATS = ""
+SWARMSGIT_APPROVAL_THRESHOLD_SATS = ""
 AGENTPAY_URL = "https://entangleit.com/api/agentpay"
 # Shared secret for the outbound release puller. Not a WIF.
 #   printf %s "$(openssl rand -hex 32)" | wrangler secret put SWARMSGIT_WALLETD_TOKEN
@@ -96,17 +107,25 @@ namespace = "swarmgit"
 [ai]
 binding = "AI"
 
-# Optional isolated test runner (Cloudflare Containers). Uncomment and
-# add a Dockerfile to exec untrusted acceptance_tests.py inside a
-# microVM. Without this binding, auto-verify uses the Preview HTTP
-# runner and defers when the protocol is unknown — never default-allows.
-# [[durable_objects.bindings]]
-# name = "SANDBOX"
-# class_name = "VerifySandbox"
-# [[migrations]]
-# tag = "v1-sandbox"
-# new_sqlite_classes = ["VerifySandbox"]
-# [[containers]]
-# class_name = "VerifySandbox"
-# image = "./Dockerfile"
-# max_instances = 5
+# Isolated auto-verify runner (Cloudflare Containers).
+# Workers Paid is required (same plan as Artifacts). Containers are a
+# paid add-on on that plan — see
+# https://developers.cloudflare.com/containers/platform/pricing/
+# The Dockerfile clones the fork then runs tests under unshare --net.
+# Missing/failing container → auto-verify defers, never allows.
+# @cloudflare/sandbox is TypeScript-only; this Python Worker uses the
+# Containers API (ctx.container.exec) on VerifySandbox instead.
+[[durable_objects.bindings]]
+name = "SANDBOX"
+class_name = "VerifySandbox"
+
+[[migrations]]
+tag = "v1-sandbox"
+new_sqlite_classes = ["VerifySandbox"]
+
+[[containers]]
+class_name = "VerifySandbox"
+scheduling_policy = "durable_object"
+
+[containers.images.sandbox]
+dockerfile = "./Dockerfile"

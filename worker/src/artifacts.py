@@ -191,7 +191,8 @@ class FakeArtifacts(ArtifactsBackend):
             "commits": list(src["commits"]),
         }
         return {"fork_id": "fork_" + fork_name.replace("/", "-"),
-                "repo_name": fork_name}
+                "repo_name": fork_name,
+                "remote": "https://artifacts.example/" + fork_name + ".git"}
 
     async def read_file(self, repo_name, ref, path):
         repo = self.repos.get(repo_name)
@@ -205,10 +206,10 @@ class FakeArtifacts(ArtifactsBackend):
             raise ArtifactsError(f"repo not found: {repo_name}")
         return list(repo["files"].keys())
 
-    async def issue_token(self, repo_name, ttl_s=3600):
+    async def issue_token(self, repo_name, ttl_s=3600, scope="write"):
         if repo_name not in self.repos:
             raise ArtifactsError(f"repo not found: {repo_name}")
-        return "fake-token-" + repo_name[-8:]
+        return "fake-token-" + (scope or "write") + "-" + repo_name[-8:]
 
     # -- test helpers (not part of the narrow interface) ------------
     def write_file(self, repo_name, path, text):

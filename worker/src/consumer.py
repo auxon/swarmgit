@@ -5,12 +5,15 @@ the TestSwarm/PreFlight scaffolds).
 Message kinds:
   {"kind": "verify", "task_id", "fork_id"}
       submit_work queued this: flip fork submitted -> verifying, task ->
-      verifying. Attestations arrive via the attest_verification MCP tool;
-      the first verified pass enqueues "merge".
+      verifying. Eligible bounties then run auto-verify (acceptance tests
+      + Clef review). A verified pass enqueues "merge". Otherwise
+      attestations arrive via attest_verification (humans/agents), used
+      for disputes and for bounties above AUTO_VERIFY_MAX_SATS.
   {"kind": "merge", "task_id", "fork_id"}
       Run the merge gate (merge_gate.run_merge_gate against the fork's
       preview_url), record the merge decision, stage the why-graph, then
-      settle (dry-run). A blocked gate returns the task to open.
+      settle. A blocked gate returns the task to open. A live send
+      without a txid leaves the release pending.
   {"kind": "arbitrate", "task_id", "fork_id", "dispute_id"}
       dispute_fork queued this: ask Clef for a ruling (see arbiter.py);
       apply on confidence >= threshold, else defer to a human.
@@ -19,11 +22,12 @@ Message kinds:
       a fork; if that fork is still working, auto-submit it.
 
 process_message(store, deps, msg) never raises. deps: {"http", "sender",
-"enqueue", "ai"} (+ "artifacts" for future diff computation).
+"enqueue", "ai", "sandbox"} (+ "artifacts" for diffs).
 """
 import time
 
 import arbiter
+import autoverify
 import gitlib
 import merge_gate
 import whygraph
@@ -37,7 +41,7 @@ async def process_message(store, deps, msg):
     try:
         kind = (msg or {}).get("kind", "")
         if kind == "verify":
-            await _on_verify(store, msg)
+            await _on_verify(store, deps, msg)
         elif kind == "merge":
             await _on_merge(store, deps, msg)
         elif kind == "arbitrate":
@@ -49,7 +53,7 @@ async def process_message(store, deps, msg):
         pass
 
 
-async def _on_verify(store, msg):
+async def _on_verify(store, deps, msg):
     fork = await store.get_fork(msg.get("fork_id", ""))
     if not fork or fork["status"] != "submitted":
         return
@@ -62,6 +66,20 @@ async def _on_verify(store, msg):
     await store.ledger_add("verify_started", fork["task_id"], "",
                            0, {"fork_id": fork["fork_id"],
                                "settlement": "dry_run"})
+    if not task or not autoverify.should_auto_verify(task, deps or {}):
+        return
+    try:
+        result = await autoverify.apply_auto_verify(
+            store, deps or {}, task, fork)
+    except Exception:
+        await store.ledger_add(
+            "auto_verify_deferred", fork["task_id"], autoverify.AUTO_VERIFIER, 0,
+            {"fork_id": fork["fork_id"], "reason": "auto-verify crashed",
+             "settlement": "dry_run"})
+        return
+    payload = result.get("merge_payload")
+    if payload:
+        await deps["enqueue"](payload)
 
 
 async def _on_merge(store, deps, msg):
@@ -117,17 +135,26 @@ async def _on_merge(store, deps, msg):
                 deps["http"], task["funding_txid"],
                 task.get("escrow_address") or "", task.get("bounty_sats") or 0)
         settled = await gitlib.settle_task(store, deps["sender"], task_id)
-        if not settled.get("funds_moved"):
-            payout = next((p for p in settled.get("payouts") or []
-                           if p.get("agent")), None)
-            if payout and payout.get("to"):
-                await store.ledger_add(
-                    "release_requested", task_id, payout["to"],
-                    int(payout.get("sats") or 0),
-                    {"task_id": task_id, "to": payout["to"],
-                     "funding_txid": settled.get("funding_txid", ""),
-                     "label": "swarmgit release %s" % task_id,
-                     "settlement": "pending"})
+        if settled.get("funds_moved"):
+            return  # live txid recorded; no puller needed
+        payout = next((p for p in settled.get("payouts") or []
+                       if p.get("agent")), None)
+        dest = (payout or {}).get("to") or ""
+        sats = int((payout or {}).get("sats") or 0)
+        if not dest:
+            task = await store.get_task(task_id)
+            # still request a puller release so an operator can pay
+            dest = ""
+            sats = int((task or {}).get("bounty_sats") or 0)
+        if dest or settled.get("pending"):
+            await store.ledger_add(
+                "release_requested", task_id, dest,
+                sats,
+                {"task_id": task_id, "to": dest,
+                 "funding_txid": settled.get("funding_txid", ""),
+                 "label": "swarmgit release %s" % task_id,
+                 "settlement": "pending",
+                 "error": settled.get("error", "")})
     except Exception:
         # settlement must never lose the merge record; the task stays
         # "merging" so an operator can retry settle_task.

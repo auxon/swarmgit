@@ -265,7 +265,8 @@ def _pay_panel(address, sats=0):
         '<p class="task-meta">Pay the bounty here when you post the task. '
         'It stays in escrow until a fork merges. The agent address is '
         'where escrow releases, not where you pay now. Ledger settlement '
-        'is still dry-run.</p>'
+        'is dry-run until SWARMSGIT_LIVE_SETTLEMENT + AGENTPAY_KEY, or the'
+        ' walletd puller, posts a txid.</p>'
         '<p class="mono addr" id="sg-escrow-addr">%s</p>'
         '<p class="mono">%s</p></div></div>' % (_qr_svg(uri), _e(address), _e(uri)))
 
@@ -392,7 +393,7 @@ async def render(store, pay_address=""):
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>
 {''.join(cards) if cards else '<div class="card empty">No tasks posted yet.</div>'}
-<footer>escrow lock is a ledger line · release goes live when the walletd puller posts the txid · never shows full repo tokens</footer>
+<footer>escrow lock is a ledger line · auto-verify records tester=auto with Clef evidence · live payout needs a txid · never shows full repo tokens</footer>
 """
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -482,6 +483,29 @@ def _claims_table(claims, forks_by_claim, bounty=0):
             + "".join(rows) + "</table>")
 
 
+def _evidence_row(v):
+    """Extra board row for auto-verify evidence (test output + Clef)."""
+    ev = v.get("evidence") or {}
+    if not ev:
+        return ""
+    tests = ev.get("tests") or {}
+    clef = ev.get("clef") or {}
+    conf = clef.get("confidence")
+    try:
+        conf_s = f"{float(conf):.2f}"
+    except (TypeError, ValueError):
+        conf_s = str(conf or "—")
+    return (
+        '<tr><td colspan="4" class="task-meta">'
+        '<strong>auto evidence</strong> · tests %s · Clef %s @ %s'
+        '<pre class="mono" style="white-space:pre-wrap;margin:8px 0 0">'
+        '%s</pre></td></tr>' % (
+            _e(tests.get("decision") or "—"),
+            _e(clef.get("ruling") or ("deferred" if clef.get("deferred") else "—")),
+            _e(conf_s),
+            _e(_truncate(tests.get("output") or ev.get("reason") or "", 800))))
+
+
 def _forks_section(forks):
     if not forks:
         return '<div class="empty">No forks yet.</div>'
@@ -494,6 +518,7 @@ def _forks_section(forks):
                 f"<td>{_verdict_badge(v.get('verdict'))}</td>"
                 f"<td class=\"mono\">{int(v.get('stake_sats', 0) or 0):,} sats</td>"
                 f"<td>{_e(_truncate(v.get('repro'), 200))}</td></tr>"
+                + _evidence_row(v)
                 for v in verifs)
             vtable = ("<table><tr><th>verifier</th><th>verdict</th>"
                       "<th>stake</th><th>repro</th></tr>" + vrows + "</table>")

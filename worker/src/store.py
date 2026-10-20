@@ -359,11 +359,13 @@ class D1Store:
 
     # -- escrow ledger (dry-run only) -------------------------------
     async def ledger_add(self, kind, task_id, agent, sats, detail):
+        detail = detail or {}
+        settlement = str(detail.get("settlement") or "dry_run")
         await self._run(
             "INSERT INTO escrow_ledger (t, kind, task_id, agent, sats,"
             " settlement, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
             int(time.time()), kind, task_id, agent or "", int(sats),
-            "dry_run", json.dumps(detail or {}))
+            settlement, json.dumps(detail))
 
     async def ledger_all(self):
         rows = await self._all(
@@ -387,6 +389,28 @@ class D1Store:
         return [{"t": r["t"], "kind": r["kind"], "agent": r["agent"],
                  "sats": int(r["sats"]), "settlement": r["settlement"],
                  "detail": json.loads(r["detail"])} for r in rows]
+
+    async def live_payout_txid(self, task_id, agent):
+        """txid of a live payout (or walletd release_done) for agent,
+        or None. Used to refuse a second live send."""
+        rows = await self.ledger_for_task(task_id)
+        for r in rows:
+            if r.get("agent") != agent:
+                continue
+            detail = r.get("detail") or {}
+            txid = detail.get("txid")
+            if not txid:
+                continue
+            if r.get("kind") in ("payout", "release_done") and (
+                    r.get("settlement") == "live"
+                    or detail.get("settlement") == "live"):
+                return txid
+        return None
+
+    async def agent_pay_address(self, agent):
+        r = await self._first(
+            "SELECT pay_address FROM agent_keys WHERE agent = ?", agent)
+        return (r.get("pay_address") or "") if r else ""
 
     # -- reputation -------------------------------------------------
     async def get_reputation(self, agent):

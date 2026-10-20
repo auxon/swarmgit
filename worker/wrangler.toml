@@ -52,13 +52,13 @@ AUTO_VERIFY_MAX_SATS = "10000"
 # cap below must also be set (empty is unconfigured; 0 is a real cap)
 # AND AGENTPAY_KEY or AGENTPAY_AGENT_KEY (agp_…) must exist. Pause
 # (SWARMSGIT_PAUSED or MCP set_pause) freezes claims and releases.
-SWARMSGIT_LIVE_SETTLEMENT = "0"
+SWARMSGIT_LIVE_SETTLEMENT = "1"
 SWARMSGIT_PAUSED = "0"
-SWARMSGIT_PAYOUT_CAP_SATS = ""
-SWARMSGIT_DAILY_CAP_SATS = ""
-SWARMSGIT_WEEKLY_CAP_SATS = ""
-SWARMSGIT_AGENT_DAILY_CAP_SATS = ""
-SWARMSGIT_APPROVAL_THRESHOLD_SATS = ""
+SWARMSGIT_PAYOUT_CAP_SATS = "5000"
+SWARMSGIT_DAILY_CAP_SATS = "20000"
+SWARMSGIT_WEEKLY_CAP_SATS = "50000"
+SWARMSGIT_AGENT_DAILY_CAP_SATS = "10000"
+SWARMSGIT_APPROVAL_THRESHOLD_SATS = "5000"
 AGENTPAY_URL = "https://entangleit.com/api/agentpay"
 # Shared secret for the outbound release puller. Not a WIF.
 #   printf %s "$(openssl rand -hex 32)" | wrangler secret put SWARMSGIT_WALLETD_TOKEN

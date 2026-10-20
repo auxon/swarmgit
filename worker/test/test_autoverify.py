@@ -293,18 +293,18 @@ async def test_missing_ai_defers():
     check("fork still verifying", fork["status"] == "verifying")
 
 
-async def test_preview_unknown_protocol_defers():
+async def test_missing_sandbox_defers():
     store = D1Store(FakeD1())
     await store.ensure_schema()
     artifacts = FakeArtifacts()
     task, claim = await _task(store, artifacts)
 
-    async def mcpish(method, url, headers, timeout=10, body=None):
+    async def green(method, url, headers, timeout=10, body=None):
         return {"ok": True, "status": 200, "headers": {},
-                "body": json.dumps({"jsonrpc": "2.0", "error": {"code": -32601}})}
+                "body": json.dumps({"ok": True})}
 
     deps = {
-        "http": mcpish,
+        "http": green,
         "ai": FakeAI(PASS_REVIEW),
         "artifacts": artifacts,
         "sender": DryRunSender(),
@@ -314,11 +314,77 @@ async def test_preview_unknown_protocol_defers():
     await consumer_mod.process_message(
         store, deps, {"kind": "verify", "task_id": task["task_id"],
                       "fork_id": claim["fork_id"]})
-    check("unknown protocol never default-allows",
+    check("missing sandbox never default-allows",
           await store.verifications_for_fork(claim["fork_id"]) == [])
     ledger = await store.ledger_for_task(task["task_id"])
     check("deferred ledger",
           any(e["kind"] == "auto_verify_deferred" for e in ledger))
+
+
+async def test_sandbox_defer_does_not_preview_pass():
+    store = D1Store(FakeD1())
+    await store.ensure_schema()
+    artifacts = FakeArtifacts()
+    task, claim = await _task(store, artifacts)
+    deps = {
+        "http": fake_http_ok,
+        "ai": FakeAI(PASS_REVIEW),
+        "artifacts": artifacts,
+        "sender": DryRunSender(),
+        "enqueue": FakeQueue().send,
+        "sandbox": autoverify.FakeSandbox(deferred=True, reason="boom"),
+        "auto_verify_max_sats": 10000,
+    }
+    await consumer_mod.process_message(
+        store, deps, {"kind": "verify", "task_id": task["task_id"],
+                      "fork_id": claim["fork_id"]})
+    check("sandbox infra defer does not fall through to preview pass",
+          await store.verifications_for_fork(claim["fork_id"]) == [])
+    fork = await store.get_fork(claim["fork_id"])
+    check("still verifying after sandbox defer",
+          fork["status"] == "verifying")
+
+
+async def test_sandbox_clone_payload():
+    store = D1Store(FakeD1())
+    await store.ensure_schema()
+    artifacts = FakeArtifacts()
+    task, claim = await _task(store, artifacts)
+    sandbox = autoverify.FakeSandbox("pass", "PASS all")
+    deps = {
+        "http": fake_http_ok,
+        "ai": FakeAI(PASS_REVIEW),
+        "artifacts": artifacts,
+        "sender": DryRunSender(),
+        "enqueue": FakeQueue().send,
+        "sandbox": sandbox,
+        "auto_verify_max_sats": 10000,
+    }
+    await consumer_mod.process_message(
+        store, deps, {"kind": "verify", "task_id": task["task_id"],
+                      "fork_id": claim["fork_id"]})
+    check("sandbox was invoked", len(sandbox.calls) == 1)
+    p = sandbox.calls[0]
+    check("clone remote is https",
+          (p.get("remote") or "").startswith("https://"))
+    check("short-lived read token issued",
+          "read" in (p.get("clone_token") or ""))
+    check("network isolation requested", p.get("isolate_network") is True)
+    check("cpu/time/memory limits set",
+          p.get("timeout_s") and p.get("cpu_seconds") and p.get("memory_mib"))
+    argv = autoverify.test_argv("python3 acceptance_tests.py", p)
+    check("tests run under unshare --net", "unshare" in argv and "--net" in argv)
+    check("wall timeout wrapper", argv[0] == "timeout")
+    cav = autoverify.clone_argv(p["remote"])
+    joined = " ".join(cav)
+    check("clone argv does not embed the token",
+          p["clone_token"] not in joined)
+    box = autoverify.VerifySandbox()
+    out = await box.run_tests({"remote": p["remote"], "clone_token": "tok"})
+    check("VerifySandbox without container defers",
+          out.get("deferred") is True)
+    red = autoverify._redact("token=sekrit and more", ["sekrit"])
+    check("output redacts secrets", "sekrit" not in red and "redacted" in red)
 
 
 async def test_bounty_above_threshold_skips_auto():
@@ -410,7 +476,10 @@ async def main():
         ("auto test fail rejects", test_auto_test_fail_rejects_fork),
         ("clef low confidence defers", test_clef_low_confidence_defers),
         ("missing AI defers", test_missing_ai_defers),
-        ("unknown protocol defers", test_preview_unknown_protocol_defers),
+        ("missing sandbox defers", test_missing_sandbox_defers),
+        ("sandbox defer does not preview-pass",
+         test_sandbox_defer_does_not_preview_pass),
+        ("sandbox clone payload", test_sandbox_clone_payload),
         ("bounty above threshold skips", test_bounty_above_threshold_skips_auto),
         ("clef fail after green tests", test_clef_fail_after_green_tests),
         ("infra crash defers", test_infra_crash_defers),

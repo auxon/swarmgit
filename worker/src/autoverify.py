@@ -4,26 +4,23 @@ A solo outside agent should be able to claim, submit, and get a
 verified pass without a human in the loop — but never by default-allow.
 This module is the fail-closed auto-verifier:
 
-  1. Run the task's acceptance tests against the submitted fork.
+  1. Clone the fork with a short-lived Artifacts *read* token and run
+     the task's acceptance tests on the fork's own code inside an
+     isolated Cloudflare Container (Durable Object VerifySandbox).
   2. Ask Clef to review the fork diff against the task description.
   3. Both must pass, with Clef confidence >= CONFIRM_THRESHOLD.
      Low confidence, missing bindings, timeouts, malformed answers,
-     unreachable preview, or sandbox/container failure → defer.
-     Never invent a pass.
+     or sandbox/container failure → defer. Never invent a pass.
 
-Isolation. Cloudflare Containers (Durable Object `ctx.container.exec`)
-are the right place to run untrusted `acceptance_tests.py` from a fork.
-SwarmGit is a Python Worker whose verify path is CPython tests +
-`wrangler deploy --dry-run`; a Dockerfile/container image is therefore
-optional, not required to ship. The runner is a narrow interface:
-
-  * `deps["sandbox"]` — if bound, RPC `run_tests(payload)` to a
-    Durable Object that execs inside an isolated container. Untrusted
-    fork code never runs in the Worker isolate.
-  * Preview HTTP runner (default) — the Worker does not eval fork
-    code. It drives named tests against the fork's Cloudflare preview
-    over the existing HTTP seam (same pattern as the merge gate).
-    Unknown protocol or unreachable preview → defer, never pass.
+Isolation. `@cloudflare/sandbox` is TypeScript-only, so it is not
+viable from this Python Worker. Cloudflare Containers are: the
+SANDBOX Durable Object calls `ctx.container.exec` on the image in
+`worker/Dockerfile`. Untrusted fork code never runs in the Worker
+isolate. Clone and optional `pip install` are the only networked
+steps; tests then run under `unshare --net` with CPU / wall-time /
+memory limits. Any infra failure (missing binding, start/exec crash,
+clone failure) defers — never allows. Preview HTTP is no longer a
+pass path for isolated tests.
 
 Bounties above AUTO_VERIFY_MAX_SATS (default 10_000) skip auto-verify
 and wait for a staked human or agent verifier. Disputes stay on the
@@ -42,6 +39,11 @@ AUTO_VERIFIER = "auto"
 DEFAULT_MAX_SATS = 10_000
 OUTPUT_CAP = 4000
 DIFF_CAP = 8000
+CLONE_TIMEOUT_S = 30
+TEST_TIMEOUT_S = 60
+TEST_CPU_SECONDS = 30
+TEST_MEMORY_MIB = 512
+READ_TOKEN_TTL_S = 300
 
 # Paths we always try to diff when Artifacts cannot list the repo.
 _COMMON_PATHS = (
@@ -191,6 +193,74 @@ def _cap(text, n=OUTPUT_CAP):
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _redact(text, secrets):
+    text = "" if text is None else str(text)
+    for s in secrets or []:
+        s = "" if s is None else str(s)
+        if s and s in text:
+            text = text.replace(s, "«redacted»")
+    return text
+
+
+def _safe_remote(url):
+    u = (url or "").strip()
+    if u.startswith("https://") or u.startswith("http://"):
+        return u
+    return ""
+
+
+def sandbox_limits(payload=None):
+    p = payload or {}
+    def _n(key, default):
+        try:
+            v = int(p.get(key) if p.get(key) is not None else default)
+        except (TypeError, ValueError):
+            v = default
+        return v if v > 0 else default
+    return {
+        "timeout_s": _n("timeout_s", TEST_TIMEOUT_S),
+        "cpu_seconds": _n("cpu_seconds", TEST_CPU_SECONDS),
+        "memory_mib": _n("memory_mib", TEST_MEMORY_MIB),
+        "clone_timeout_s": _n("clone_timeout_s", CLONE_TIMEOUT_S),
+    }
+
+
+def clone_script():
+    """bash -c script. $1=remote $2=dest. Token on stdin. Never echoed."""
+    return (
+        'set -euo pipefail\n'
+        'remote="$1"; dest="$2"\n'
+        'IFS= read -r token\n'
+        'export GIT_TERMINAL_PROMPT=0\n'
+        'git -c http.extraHeader="Authorization: Bearer ${token}" '
+        'clone --depth 1 -- "$remote" "$dest"\n'
+        'unset token\n'
+    )
+
+
+def clone_argv(remote, dest="/tmp/fork", timeout_s=CLONE_TIMEOUT_S):
+    return ["timeout", "--kill-after=5", str(int(timeout_s)),
+            "bash", "-c", clone_script(), "clone", remote, dest]
+
+
+def install_argv(timeout_s=60):
+    return ["timeout", "--kill-after=5", str(int(timeout_s)),
+            "bash", "-lc",
+            "if [ -f /tmp/fork/requirements.txt ]; then "
+            "pip install --no-cache-dir -q -r /tmp/fork/requirements.txt; "
+            "fi"]
+
+
+def test_argv(command, limits):
+    """Run tests with no network (unshare --net) plus CPU/time/memory caps."""
+    limits = sandbox_limits(limits)
+    mem_kb = int(limits["memory_mib"]) * 1024
+    inner = "ulimit -t %d; ulimit -v %d; cd /tmp/fork && %s" % (
+        int(limits["cpu_seconds"]), mem_kb, command)
+    return ["timeout", "--kill-after=5", str(int(limits["timeout_s"])),
+            "unshare", "--net", "--", "bash", "-lc", inner]
+
+
 def _preview_base(url):
     return (url or "").strip().rstrip("/")
 
@@ -337,20 +407,54 @@ async def run_preview_tests(deps, task, fork):
             "output": output, "results": results}
 
 
-async def run_sandbox_tests(sandbox, task, fork, files=None):
-    """Ask the container sandbox to exec the task's test command."""
+async def issue_read_token(artifacts, repo_name, ttl_s=READ_TOKEN_TTL_S):
+    """Short-lived read token for the sandbox clone. Never persisted."""
+    if artifacts is None or not repo_name:
+        return ""
+    issuer = getattr(artifacts, "issue_token", None)
+    if not callable(issuer):
+        return ""
+    try:
+        tok = await issuer(repo_name, ttl_s=int(ttl_s), scope="read")
+    except TypeError:
+        try:
+            tok = await issuer(repo_name, int(ttl_s), "read")
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+    return (tok or "").strip()
+
+
+async def run_sandbox_tests(sandbox, task, fork, files=None, artifacts=None):
+    """Ask the container sandbox to clone the fork and exec tests."""
     specs = _test_specs(task)
     names = [s["name"] for s in specs]
-    preview = _preview_base((fork or {}).get("preview_url") or "")
     command = (task.get("test_command") if isinstance(task, dict) else "") \
         or "python3 acceptance_tests.py"
+    remote = _safe_remote((fork or {}).get("remote") or "")
+    repo_name = (fork or {}).get("repo_name", "")
+    token = await issue_read_token(artifacts, repo_name)
+    if not remote:
+        return {"decision": "defer",
+                "reason": "fork has no clone remote",
+                "output": "", "results": []}
+    if not token:
+        return {"decision": "defer",
+                "reason": "could not issue a short-lived read token",
+                "output": "", "results": []}
     payload = {
         "fork_id": (fork or {}).get("fork_id", ""),
-        "repo_name": (fork or {}).get("repo_name", ""),
-        "preview_url": preview,
+        "repo_name": repo_name,
+        "remote": remote,
+        "clone_token": token,
         "command": command,
         "tests": names,
         "files": files or {},
+        "timeout_s": TEST_TIMEOUT_S,
+        "cpu_seconds": TEST_CPU_SECONDS,
+        "memory_mib": TEST_MEMORY_MIB,
+        "isolate_network": True,
     }
     try:
         raw = await sandbox.run_tests(payload)
@@ -363,10 +467,11 @@ async def run_sandbox_tests(sandbox, task, fork, files=None):
                 "output": "", "results": []}
     if raw.get("deferred") or raw.get("decision") == "defer":
         return {"decision": "defer",
-                "reason": raw.get("reason") or "sandbox deferred",
-                "output": _cap(raw.get("output") or ""),
+                "reason": _redact(raw.get("reason") or "sandbox deferred",
+                                  [token]),
+                "output": _cap(_redact(raw.get("output") or "", [token])),
                 "results": raw.get("results") or []}
-    output = _cap(raw.get("output") or "")
+    output = _cap(_redact(raw.get("output") or "", [token]))
     code = raw.get("exit_code")
     try:
         code = int(code) if code is not None else None
@@ -436,10 +541,12 @@ async def run_auto_verify(store, deps, task, fork):
     """Run tests + Clef review. Returns a decision record.
 
     decision: pass | fail | defer
+    Isolated tests require the SANDBOX container. Missing or failing
+    sandbox defers — preview HTTP is never a pass path.
     """
     sandbox = deps.get("sandbox")
-    files = {}
     artifacts = deps.get("artifacts")
+    files = {}
     if artifacts is not None and fork.get("repo_name"):
         lister = getattr(artifacts, "list_files", None)
         if callable(lister):
@@ -464,16 +571,13 @@ async def run_auto_verify(store, deps, task, fork):
                 if text is not None:
                     files[path] = text
 
-    if sandbox is not None:
-        test_result = await run_sandbox_tests(sandbox, task, fork, files)
-        # A sandbox that cannot run (deferred) falls through to preview
-        # HTTP rather than stopping; still never default-allows.
-        if test_result.get("decision") == "defer" and fork.get("preview_url"):
-            preview = await run_preview_tests(deps, task, fork)
-            if preview.get("decision") != "defer":
-                test_result = preview
+    if sandbox is None:
+        test_result = {"decision": "defer",
+                       "reason": "sandbox not bound — isolated tests required",
+                       "output": "", "results": []}
     else:
-        test_result = await run_preview_tests(deps, task, fork)
+        test_result = await run_sandbox_tests(
+            sandbox, task, fork, files, artifacts=artifacts)
 
     diff_text = await collect_diff(
         artifacts, (task or {}).get("repo", ""),
@@ -583,13 +687,57 @@ except Exception:  # CPython tests: no workers runtime
             self.env = env
 
 
-class VerifySandbox(_DurableObject):
-    """Optional Durable Object: exec acceptance tests in a Container.
+async def _await_maybe(value):
+    if value is not None and hasattr(value, "__await__"):
+        return await value
+    return value
 
-    Bound only when wrangler.toml declares a `SANDBOX` Durable Object
-    (and, for live isolation, a [[containers]] image). Without a
-    container the RPC returns deferred — never a pass. Untrusted
-    command strings are executed inside the container, not here.
+
+def _decode_bytes(v):
+    if isinstance(v, (bytes, bytearray)):
+        return v.decode("utf-8", "replace")
+    return "" if v is None else str(v)
+
+
+def _exec_result(out):
+    stdout = _decode_bytes(getattr(out, "stdout", b"") or b"")
+    stderr = _decode_bytes(getattr(out, "stderr", b"") or b"")
+    code = getattr(out, "exitCode", None)
+    if code is None:
+        code = getattr(out, "exit_code", None)
+    try:
+        code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    return code, stdout, stderr
+
+
+async def _container_exec(container, argv, opts=None):
+    if opts:
+        proc = await container.exec(argv, opts)
+    else:
+        proc = await container.exec(argv)
+    out = await proc.output() if hasattr(proc, "output") else proc
+    return _exec_result(out)
+
+
+async def _container_destroy(container):
+    destroy = getattr(container, "destroy", None)
+    if not callable(destroy):
+        return
+    try:
+        await _await_maybe(destroy())
+    except Exception:
+        pass
+
+
+class VerifySandbox(_DurableObject):
+    """Durable Object: clone a fork and exec tests in a Container.
+
+    Bound by wrangler.toml `SANDBOX` + [[containers]] image. Without a
+    container the RPC returns deferred — never a pass. Clone uses a
+    short-lived read token on stdin (never logged). Tests run under
+    `unshare --net` with CPU / time / memory limits.
     """
 
     def __init__(self, ctx=None, env=None):
@@ -602,59 +750,97 @@ class VerifySandbox(_DurableObject):
 
     async def run_tests(self, payload):
         payload = payload or {}
+        token = (payload.get("clone_token") or "").strip()
+        remote = _safe_remote(payload.get("remote") or "")
+        command = payload.get("command") or "python3 acceptance_tests.py"
+        limits = sandbox_limits(payload)
         container = getattr(self.ctx, "container", None) if self.ctx else None
         if container is None:
             return {"deferred": True,
                     "reason": "container not configured on SANDBOX DO"}
+        if not remote:
+            return {"deferred": True, "reason": "fork has no clone remote"}
+        if not token:
+            return {"deferred": True,
+                    "reason": "missing short-lived read token"}
         try:
-            running = getattr(container, "running", False)
-            if not running:
-                start = getattr(container, "start", None)
-                if start is None:
-                    return {"deferred": True,
-                            "reason": "container cannot start"}
-                opts = {"enableInternet": True, "entrypoint": ["sleep", "infinity"]}
-                images = getattr(container, "images", None)
-                if images is not None:
-                    img = getattr(images, "workspace", None) \
-                        or getattr(images, "base", None)
-                    if img:
-                        opts["image"] = img
-                starter = start(opts) if start else None
-                if starter is not None and hasattr(starter, "__await__"):
-                    await starter
-            files = payload.get("files") or {}
-            for path, text in list(files.items())[:40]:
-                dest = "/workspace/" + str(path).lstrip("/")
-                proc = await container.exec(
-                    ["bash", "-lc",
-                     "mkdir -p \"$(dirname %s)\" && cat > %s" % (
-                         json.dumps(dest), json.dumps(dest))],
-                    {"stdin": str(text)})
-                if hasattr(proc, "output"):
-                    await proc.output()
-            preview = payload.get("preview_url") or ""
-            command = payload.get("command") or "python3 acceptance_tests.py"
-            argv = ["timeout", "--kill-after=5", "60",
-                    "bash", "-lc", command + " " + json.dumps(preview)]
-            proc = await container.exec(argv, {"cwd": "/workspace"})
-            out = await proc.output() if hasattr(proc, "output") else proc
-            stdout = getattr(out, "stdout", b"") or b""
-            stderr = getattr(out, "stderr", b"") or b""
-            if isinstance(stdout, (bytes, bytearray)):
-                stdout = stdout.decode("utf-8", "replace")
-            if isinstance(stderr, (bytes, bytearray)):
-                stderr = stderr.decode("utf-8", "replace")
-            code = getattr(out, "exitCode", None)
-            if code is None:
-                code = getattr(out, "exit_code", None)
-            combined = _cap(str(stdout) + ("\n" + str(stderr) if stderr else ""))
-            decision = "pass" if code == 0 else "fail"
-            return {"decision": decision, "exit_code": code,
-                    "output": combined}
+            if getattr(container, "running", False):
+                await _container_destroy(container)
+            start = getattr(container, "start", None)
+            if start is None:
+                return {"deferred": True, "reason": "container cannot start"}
+            opts = {
+                "enableInternet": True,
+                "entrypoint": ["sleep", "infinity"],
+                "instance": {"vcpu": 0.25, "memoryMib": 1024, "diskMb": 4000},
+            }
+            images = getattr(container, "images", None)
+            if images is not None:
+                img = getattr(images, "sandbox", None) \
+                    or getattr(images, "base", None) \
+                    or getattr(images, "workspace", None)
+                if img:
+                    opts["image"] = img
+            await _await_maybe(start(opts))
+            idle = getattr(container, "setInactivityTimeout", None)
+            if callable(idle):
+                try:
+                    await _await_maybe(idle(3 * 60 * 1000))
+                except Exception:
+                    pass
+
+            code, stdout, stderr = await _container_exec(
+                container,
+                clone_argv(remote, "/tmp/fork", limits["clone_timeout_s"]),
+                {"stdin": token + "\n"})
+            combined = _redact(
+                _cap(str(stdout) + ("\n" + str(stderr) if stderr else "")),
+                [token])
+            if code != 0:
+                return {"deferred": True, "exit_code": code,
+                        "reason": "clone failed (infra — deferred)",
+                        "output": combined}
+
+            if payload.get("install") is not False:
+                icode, iout, ierr = await _container_exec(
+                    container, install_argv(limits["clone_timeout_s"]))
+                if icode not in (0, None):
+                    combined = _redact(
+                        _cap(combined + "\n" + str(iout)
+                             + ("\n" + str(ierr) if ierr else "")),
+                        [token])
+                    return {"deferred": True, "exit_code": icode,
+                            "reason": "package install failed (infra — deferred)",
+                            "output": combined}
+
+            tcode, tout, terr = await _container_exec(
+                container, test_argv(command, limits))
+            combined = _redact(
+                _cap(str(tout) + ("\n" + str(terr) if terr else "")),
+                [token])
+            if tcode is None:
+                return {"deferred": True,
+                        "reason": "sandbox produced no exit code",
+                        "output": combined}
+            # unshare not permitted / timeout wrapper missing → infra defer
+            if tcode in (124, 125, 126, 127) and "unshare" in (terr or ""):
+                return {"deferred": True, "exit_code": tcode,
+                        "reason": "network isolation failed (infra — deferred)",
+                        "output": combined}
+            decision = "pass" if tcode == 0 else "fail"
+            reason = "" if tcode == 0 else (
+                "tests timed out" if tcode == 124
+                else "tests exited %s" % tcode)
+            return {"decision": decision, "exit_code": tcode,
+                    "reason": reason, "output": combined}
         except Exception as e:
             return {"deferred": True,
                     "reason": f"container exec failed: {type(e).__name__}"}
+        finally:
+            try:
+                await _container_destroy(container)
+            except Exception:
+                pass
 
 
 def sandbox_from_env(env):

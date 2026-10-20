@@ -4,8 +4,10 @@ DryRunSender is the default: it records payout intent and moves
 nothing. Real sats move only when ALL of these hold:
 
   * SWARMSGIT_LIVE_SETTLEMENT is truthy (wrangler var)
-  * secret AGENTPAY_KEY (agp_…) is set
+  * secret AGENTPAY_KEY or AGENTPAY_AGENT_KEY (agp_…) is set
+  * every spend cap env var is configured (see spendctl.CAP_VARS)
   * AgentPaySender.send returns a txid (on-chain) or receipt (internal)
+  * the operator pause is off (checked at settle, not here)
 
 The live primitive is agentpay's actual endpoint, inspected 2026-10-20
 and updated for auxon/agentpay#7 (apw_ dests):
@@ -231,20 +233,15 @@ def _receipt_from_parsed(parsed, dest, sats):
 
 
 def choose_sender(env, http):
-    """Pick the wired Sender. Live agentpay only with flag AND key."""
-    try:
-        live = _truthy(getattr(env, "SWARMSGIT_LIVE_SETTLEMENT", ""))
-    except Exception:
-        live = False
-    key = ""
-    try:
-        key = (getattr(env, "AGENTPAY_KEY", None)
-               or getattr(env, "AGENTPAY_AGENT_KEY", None)
-               or "")
-        key = str(key).strip()
-    except Exception:
-        key = ""
-    if live and key:
+    """Pick the wired Sender. Live agentpay only when fully armed.
+
+    Flag + key is not enough: every spend cap must be configured too
+    (spendctl.live_armed). Flipping SWARMSGIT_LIVE_SETTLEMENT=1 alone
+    stays DryRun even if AGENTPAY_AGENT_KEY is already in prod.
+    """
+    import spendctl
+    if spendctl.live_armed(env):
+        key = spendctl.agentpay_key(env)
         try:
             base = (getattr(env, "AGENTPAY_URL", "") or "").strip()
         except Exception:

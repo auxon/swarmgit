@@ -476,7 +476,7 @@ async def main():
                             body={"jsonrpc": "2.0", "id": 1,
                                   "method": "tools/list"})
     check("entry: bearer -> tools/list 200",
-          s == 200 and len(b["result"]["tools"]) == 11)
+          s == 200 and len(b["result"]["tools"]) == 14)
     s, b = await fetch_json("POST", "/mcp", headers={}, body={
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "list_tasks", "arguments": {}}})

@@ -239,6 +239,8 @@ async def main():
     check("B1: gate mode shown", "gate mode:" in body)
     check("B1: bounty shown", "9,000 sats" in body)
     check("B1: settlement section", "Settlement" in body)
+    check("B1: spend controls panel", 'id="sg-spend"' in body)
+    check("B1: pause form", 'id="sg-pause-form"' in body)
     check("B1: dry-run payouts have no WhatsOnChain",
           "whatsonchain.com" not in body)
 

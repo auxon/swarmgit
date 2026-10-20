@@ -8,15 +8,17 @@ per-task escrow, reputation) to coding tasks on Artifacts forks:
      ↘ expired (bounty returned)      ↘ disputed → Clef | human close
 
 Settlement is dry-run by default (DryRunSender). Real sats move only
-through AgentPaySender (flag + AGENTPAY_KEY) or the walletd puller,
-and only when a txid (on-chain) or receipt (internal apw_ credit)
-comes back. A failing send leaves the release pending — never marked
-paid.
+through AgentPaySender when live settlement is fully armed (flag +
+agentpay key + every spend cap) or the walletd puller, and only when
+a txid (on-chain) or receipt (internal apw_ credit) comes back. A
+failing send leaves the release pending — never marked paid. Pause
+and spend caps gate live payouts.
 """
 import re
 import time
 
 import artifacts as artifacts_mod
+import spendctl as spendctl_mod
 
 AUTO_VERIFIER = "auto"
 
@@ -184,10 +186,13 @@ async def post_task(store, spec, task_id=None):
 
 # ---------------------------------------------------------------- claim
 
-async def claim_task(store, artifacts, task_id, agent, pay_address=""):
+async def claim_task(store, artifacts, task_id, agent, pay_address="",
+                     env=None):
     """Agent claims a task: exactly one claim per agent (DDL UNIQUE),
     mints a private Artifacts fork with a short-lived repo-scoped token."""
     agent = validate_agent_name(agent)
+    if await spendctl_mod.is_paused(env, store):
+        raise GitError("refused: SwarmGit is paused — new claims are frozen")
     task = await store.get_task(task_id)
     if not task:
         raise GitError("refused: task not found")
@@ -221,6 +226,7 @@ async def claim_task(store, artifacts, task_id, agent, pay_address=""):
         "task_id": task_id,
         "claim_id": claim_id,
         "repo_name": fork["repo_name"],
+        "remote": fork.get("remote") or "",
         "preview_url": "",
         "status": "working",
         "created_at": int(time.time()),
@@ -453,16 +459,27 @@ async def _existing_paid(store, task_id, agent):
 
 
 async def _send_payout(store, sender, task_id, agent, dest, sats, role, memo,
-                       live_mode):
+                       live_mode, env=None):
     """Send one payout. Never reports paid without a txid or receipt.
 
-    Returns (receipt_or_none, pending_reason). pending_reason set means
-    this send must not mark the task paid.
+    Returns (receipt_or_none, pending_info). pending_info is None on
+    success, a reason string on send failure, or a {code, reason} dict
+    when spend controls blocked the send.
     """
     existing = await _existing_paid(store, task_id, agent)
     if existing:
         return ({"ok": True, "to": dest, "agent": agent, "sats": sats,
                  "idempotent": True, **existing}, None)
+    if live_mode:
+        blocked = await spendctl_mod.gate_payout(
+            env, store, agent, sats, task_id)
+        if blocked:
+            await store.ledger_add(
+                "payout_blocked", task_id, agent, sats,
+                {"role": role, "to": dest, "code": blocked.get("code", ""),
+                 "reason": blocked.get("reason", ""),
+                 "settlement": "pending"})
+            return None, blocked
     if live_mode and dest and not is_payout_dest(dest):
         await store.ledger_add(
             "payout_skipped", task_id, agent, sats,
@@ -526,7 +543,7 @@ def _winner_paid(payouts, winner):
     return None
 
 
-async def settle_task(store, sender, task_id, idempotency_key=""):
+async def settle_task(store, sender, task_id, idempotency_key="", env=None):
     """Release escrow to the winner (and passing verifiers).
 
     DryRunSender: local ledger only, task becomes settled, no txid.
@@ -535,6 +552,8 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
     internal). A failing or empty send leaves the task merging and the
     release pending. Repeating settle with the same keys will not
     double-pay (ledger receipt/txid short-circuit + agentpay idempotency).
+    Pause freezes every settle (dry-run included). Live sends also
+    pass spendctl.gate_payout (caps + approval).
     """
     task = await store.get_task(task_id)
     if not task:
@@ -576,19 +595,39 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
         worker_sats, verifier_sats = split_bounty(bounty, passing)
     else:
         worker_sats, verifier_sats = bounty, {}
+    if await spendctl_mod.is_paused(env, store):
+        await store.ledger_add(
+            "payout_blocked", task_id, winner, int(task["bounty_sats"]),
+            {"code": "paused",
+             "reason": "SwarmGit is paused — releases are frozen",
+             "settlement": "pending"})
+        return {"ok": False, "pending": True, "task_id": task_id,
+                "funds_moved": False, "dry_run": False,
+                "bounty_sats": int(task["bounty_sats"]),
+                "funding_txid": task.get("funding_txid", ""),
+                "winner": winner, "payouts": [],
+                "block_code": "paused",
+                "error": "SwarmGit is paused — releases are frozen",
+                "note": "paused — no release"}
     live_mode = getattr(sender, "settlement_mode", "dry_run") == "live"
     payouts = []
     r, pending = await _send_payout(
         store, sender, task_id, winner, dest, worker_sats, "winner",
-        f"swarmgit bounty: {task_id} winner", live_mode)
+        f"swarmgit bounty: {task_id} winner", live_mode, env=env)
+    block_code = ""
+    if isinstance(pending, dict):
+        block_code = pending.get("code") or ""
+        pending = pending.get("reason") or block_code
     if r:
         r["funding_txid"] = task.get("funding_txid", "")
         payouts.append(r)
     for v, sats in verifier_sats.items():
         vdest = await _agent_pay_dest(store, v) or v
-        rv, _vpend = await _send_payout(
+        rv, vpend = await _send_payout(
             store, sender, task_id, v, vdest, sats, "verifier",
-            f"swarmgit verifier: {task_id}", live_mode)
+            f"swarmgit verifier: {task_id}", live_mode, env=env)
+        if isinstance(vpend, dict) and not block_code:
+            block_code = vpend.get("code") or ""
         if rv:
             payouts.append(rv)
     if pending and live_mode:
@@ -597,6 +636,7 @@ async def settle_task(store, sender, task_id, idempotency_key=""):
                 "bounty_sats": bounty,
                 "funding_txid": task.get("funding_txid", ""),
                 "winner": winner, "payouts": payouts,
+                "block_code": block_code,
                 "error": pending,
                 "note": "release pending — send did not return a"
                         " txid or receipt; not marked paid"}

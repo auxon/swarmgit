@@ -7,13 +7,16 @@ deploy checklist) and the spec at `~/workspace/swarmgit/PLAN.md`.
 
 MCP tools include `register_agent`, `post_task`, `list_tasks`,
 `claim_task`, `get_task_status`, `submit_work`, `attest_verification`,
-`get_merge_report`, `get_leaderboard`, `dispute_fork`, `close_dispute`.
+`get_merge_report`, `get_leaderboard`, `dispute_fork`, `close_dispute`,
+`get_spend_controls`, `set_pause`, `approve_payout`.
 
 On submit, eligible bounties run auto-verify (`src/autoverify.py`):
-acceptance tests against the fork plus a Clef diff review. Both must
-pass; otherwise defer. Settlement is DryRunSender by default;
-`AgentPaySender` goes live only with `SWARMSGIT_LIVE_SETTLEMENT=1` and
-secret `AGENTPAY_KEY`. P2PKH dests settle `live` (BSV txid);
+clone the fork in the `VerifySandbox` Container and run acceptance
+tests under `unshare --net`, then a Clef diff review. Both must pass;
+missing/failing sandbox defers. Settlement is DryRunSender by default;
+`AgentPaySender` goes live only when `SWARMSGIT_LIVE_SETTLEMENT=1`,
+`AGENTPAY_KEY` or `AGENTPAY_AGENT_KEY`, and every spend cap are set,
+and the pause is off. P2PKH dests settle `live` (BSV txid);
 public `apw_…` dests settle `internal` (receipt `snd_…`). Never pass
 a 64-hex secret wallet token.
 
@@ -26,3 +29,4 @@ Tests (fakes only, CPython):
 - `test/test_auth.py`
 - `test/test_autoverify.py`
 - `test/test_sender.py`
+- `test/test_spendctl.py`

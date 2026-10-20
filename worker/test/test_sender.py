@@ -21,6 +21,21 @@ from store import D1Store  # noqa: E402
 import gitlib  # noqa: E402
 from artifacts import FakeArtifacts  # noqa: E402
 
+LIVE_CAPS = {
+    "SWARMSGIT_PAYOUT_CAP_SATS": "100000",
+    "SWARMSGIT_DAILY_CAP_SATS": "1000000",
+    "SWARMSGIT_WEEKLY_CAP_SATS": "5000000",
+    "SWARMSGIT_AGENT_DAILY_CAP_SATS": "500000",
+    "SWARMSGIT_APPROVAL_THRESHOLD_SATS": "100000",
+}
+
+
+def live_env(**kw):
+    d = {"SWARMSGIT_LIVE_SETTLEMENT": "1", "AGENTPAY_KEY": "agp_secret"}
+    d.update(LIVE_CAPS)
+    d.update(kw)
+    return types.SimpleNamespace(**d)
+
 
 class FakeStmt:
     def __init__(self, conn, sql):
@@ -202,7 +217,17 @@ async def test_choose_sender_needs_flag_and_key():
     env = types.SimpleNamespace(SWARMSGIT_LIVE_SETTLEMENT="1",
                                 AGENTPAY_KEY="agp_secret")
     s = choose_sender(env, http)
-    check("flag+key is AgentPaySender", isinstance(s, AgentPaySender))
+    check("flag+key without caps stays dry-run", isinstance(s, DryRunSender))
+    env = live_env()
+    s = choose_sender(env, http)
+    check("flag+key+caps is AgentPaySender", isinstance(s, AgentPaySender))
+    env = live_env(AGENTPAY_KEY="", AGENTPAY_AGENT_KEY="agp_prod")
+    s = choose_sender(env, http)
+    check("AGENTPAY_AGENT_KEY arms AgentPaySender",
+          isinstance(s, AgentPaySender))
+    env = live_env(SWARMSGIT_DAILY_CAP_SATS="")
+    s = choose_sender(env, http)
+    check("blank cap stays dry-run", isinstance(s, DryRunSender))
 
 
 async def test_agentpay_send_ok_and_idempotent():
@@ -289,7 +314,7 @@ async def test_failing_payout_stays_pending():
     artifacts = FakeArtifacts()
     task, claim = await _ready_to_settle(store, artifacts)
     sender = AgentPaySender(FakeAgentPayHTTP("fail"), "agp_secret")
-    out = await gitlib.settle_task(store, sender, task["task_id"])
+    out = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("failing live send is pending", out.get("pending") is True)
     check("not funds_moved", out.get("funds_moved") is not True)
     rec = await store.get_task(task["task_id"])
@@ -309,14 +334,14 @@ async def test_double_payout_prevented():
     task, claim = await _ready_to_settle(store, artifacts)
     http = FakeAgentPayHTTP()
     sender = AgentPaySender(http, "agp_secret")
-    out1 = await gitlib.settle_task(store, sender, task["task_id"])
+    out1 = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("first live settle paid", out1.get("funds_moved") is True
           and out1["payouts"][0]["txid"])
     n_after_first = len(http.calls)
     rec = await store.get_task(task["task_id"])
     check("task settled", rec["status"] == "settled")
     try:
-        await gitlib.settle_task(store, sender, task["task_id"])
+        await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     except gitlib.GitError as e:
         check("second settle refused (not merging)", "not merging" in str(e))
     else:
@@ -327,7 +352,7 @@ async def test_double_payout_prevented():
     # short-circuit must not broadcast a second payment.
     rec["status"] = "merging"
     await store.put_task(rec)
-    out2 = await gitlib.settle_task(store, sender, task["task_id"])
+    out2 = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("replay reuses txid",
           out2["payouts"][0]["txid"] == out1["payouts"][0]["txid"])
     check("replay did not POST a new send",
@@ -367,7 +392,7 @@ async def test_internal_settle_records_receipt():
                                          pay_address=WALLET_ID)
     http = FakeAgentPayHTTP()
     sender = AgentPaySender(http, "agp_secret")
-    out = await gitlib.settle_task(store, sender, task["task_id"])
+    out = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("internal settle paid", out.get("funds_moved") is True)
     check("winner settlement is internal",
           out["payouts"][0]["settlement"] == "internal")
@@ -403,12 +428,12 @@ async def test_internal_double_payout_prevented():
                                          pay_address=WALLET_ID)
     http = FakeAgentPayHTTP()
     sender = AgentPaySender(http, "agp_secret")
-    out1 = await gitlib.settle_task(store, sender, task["task_id"])
+    out1 = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     n_after_first = len(http.calls)
     rec = await store.get_task(task["task_id"])
     rec["status"] = "merging"
     await store.put_task(rec)
-    out2 = await gitlib.settle_task(store, sender, task["task_id"])
+    out2 = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("internal replay reuses receipt",
           out2["payouts"][0]["receipt_id"] == out1["payouts"][0]["receipt_id"])
     check("internal replay did not POST a new send",
@@ -423,7 +448,7 @@ async def test_live_settle_records_bsv_txid():
     artifacts = FakeArtifacts()
     task, claim = await _ready_to_settle(store, artifacts, pay_address=P2PKH)
     sender = AgentPaySender(FakeAgentPayHTTP(), "agp_secret")
-    out = await gitlib.settle_task(store, sender, task["task_id"])
+    out = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("live settle paid", out.get("funds_moved") is True)
     check("winner settlement is live",
           out["payouts"][0]["settlement"] == "live")
@@ -459,7 +484,7 @@ async def test_dry_run_still_settles_locally():
     artifacts = FakeArtifacts()
     task, claim = await _ready_to_settle(store, artifacts)
     sender = DryRunSender()
-    out = await gitlib.settle_task(store, sender, task["task_id"])
+    out = await gitlib.settle_task(store, sender, task["task_id"], env=live_env())
     check("dry-run ok", out.get("ok") is True and out.get("dry_run") is True)
     rec = await store.get_task(task["task_id"])
     check("dry-run task settled", rec["status"] == "settled")

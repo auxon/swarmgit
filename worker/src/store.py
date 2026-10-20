@@ -169,6 +169,27 @@ CREATE TABLE IF NOT EXISTS disputes (
     """,
     "CREATE INDEX IF NOT EXISTS idx_sgdisputes_fork ON disputes(fork_id)",
     "CREATE INDEX IF NOT EXISTS idx_sgdisputes_task ON disputes(task_id)",
+    """
+CREATE TABLE IF NOT EXISTS meta (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+)
+    """,
+    """
+CREATE TABLE IF NOT EXISTS payout_approvals (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  sats INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  operator TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(task_id, agent)
+)
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sgappr_status ON payout_approvals(status)",
 ]
 
 
@@ -369,7 +390,7 @@ class D1Store:
 
     async def ledger_all(self):
         rows = await self._all(
-            "SELECT kind, task_id, agent, sats, settlement, detail"
+            "SELECT t, kind, task_id, agent, sats, settlement, detail"
             " FROM escrow_ledger ORDER BY id")
         out = []
         for r in rows:
@@ -377,7 +398,8 @@ class D1Store:
                 detail = json.loads(r["detail"] or "{}")
             except Exception:
                 detail = {}
-            out.append({"kind": r["kind"], "task_id": r["task_id"],
+            out.append({"t": int(r.get("t") or 0),
+                        "kind": r["kind"], "task_id": r["task_id"],
                         "agent": r["agent"], "sats": int(r["sats"]),
                         "settlement": r["settlement"], "detail": detail})
         return out
@@ -581,3 +603,44 @@ class D1Store:
         r = await self._first(
             "SELECT 1 AS x FROM agent_keys WHERE agent = ?", agent)
         return r is not None
+
+    async def get_meta(self, key):
+        r = await self._first("SELECT v FROM meta WHERE k = ?", key)
+        return (r.get("v") or "") if r else ""
+
+    async def set_meta(self, key, value):
+        await self._run(
+            "INSERT INTO meta (k, v) VALUES (?, ?)"
+            " ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            key, str(value))
+
+    async def get_payout_approval(self, task_id, agent):
+        return await self._first(
+            "SELECT id, task_id, agent, sats, status, operator, note,"
+            " created_at, decided_at FROM payout_approvals"
+            " WHERE task_id = ? AND agent = ?",
+            task_id, agent)
+
+    async def put_payout_approval(self, row):
+        await self._run(
+            "INSERT INTO payout_approvals (id, task_id, agent, sats, status,"
+            " operator, note, created_at, decided_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET status=excluded.status,"
+            " operator=excluded.operator, note=excluded.note,"
+            " decided_at=excluded.decided_at, sats=excluded.sats",
+            row["id"], row["task_id"], row["agent"], int(row.get("sats") or 0),
+            row.get("status", "pending"), row.get("operator", ""),
+            row.get("note", ""), int(row.get("created_at") or time.time()),
+            int(row.get("decided_at") or 0))
+
+    async def list_payout_approvals(self, status="pending"):
+        if status:
+            return await self._all(
+                "SELECT id, task_id, agent, sats, status, operator, note,"
+                " created_at, decided_at FROM payout_approvals"
+                " WHERE status = ? ORDER BY created_at", status)
+        return await self._all(
+            "SELECT id, task_id, agent, sats, status, operator, note,"
+            " created_at, decided_at FROM payout_approvals"
+            " ORDER BY created_at")

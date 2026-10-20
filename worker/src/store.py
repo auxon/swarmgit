@@ -390,22 +390,37 @@ class D1Store:
                  "sats": int(r["sats"]), "settlement": r["settlement"],
                  "detail": json.loads(r["detail"])} for r in rows]
 
-    async def live_payout_txid(self, task_id, agent):
-        """txid of a live payout (or walletd release_done) for agent,
-        or None. Used to refuse a second live send."""
+    async def paid_payout(self, task_id, agent):
+        """Already-paid payout for agent: live BSV txid or internal
+        receipt. Used to refuse a second send."""
         rows = await self.ledger_for_task(task_id)
         for r in rows:
             if r.get("agent") != agent:
                 continue
-            detail = r.get("detail") or {}
-            txid = detail.get("txid")
-            if not txid:
+            if r.get("kind") not in ("payout", "release_done"):
                 continue
-            if r.get("kind") in ("payout", "release_done") and (
-                    r.get("settlement") == "live"
-                    or detail.get("settlement") == "live"):
-                return txid
+            detail = r.get("detail") or {}
+            settlement = (r.get("settlement")
+                          or detail.get("settlement") or "")
+            if settlement == "internal":
+                rid = detail.get("receipt_id") or ""
+                if rid:
+                    return {"settlement": "internal",
+                            "receipt_id": rid, "txid": None}
+            if settlement == "live" or r.get("kind") == "release_done":
+                txid = detail.get("txid")
+                if txid:
+                    return {"settlement": "live", "txid": txid,
+                            "receipt_id": None}
         return None
+
+    async def live_payout_txid(self, task_id, agent):
+        """txid or receipt id of a paid payout (or walletd release_done)
+        for agent, or None. Used to refuse a second live send."""
+        hit = await self.paid_payout(task_id, agent)
+        if not hit:
+            return None
+        return hit.get("txid") or hit.get("receipt_id")
 
     async def agent_pay_address(self, agent):
         r = await self._first(

@@ -240,7 +240,9 @@ claim → submit → merge-gate without a human verifier on bounties at or
 below `AUTO_VERIFY_MAX_SATS`. `AgentPaySender` against the live
 `POST /api/agentpay/agent/send` primitive, still DryRunSender by
 default; live only with `SWARMSGIT_LIVE_SETTLEMENT` + `AGENTPAY_KEY`.
-Walletd puller kept as the other path. Never mark paid without a txid.
+Honor agentpay `settlement` (`live` BSV txid vs `internal` snd_
+receipt). Walletd puller kept as the other path. Never mark paid
+without a txid or receipt.
 
 ---
 
@@ -263,7 +265,8 @@ Walletd puller kept as the other path. Never mark paid without a txid.
    AgentPay now has `POST /agent/send` (Bearer `agp_…`, idempotency
    key, txid). SwarmGit wires `AgentPaySender` behind
    `SWARMSGIT_LIVE_SETTLEMENT` + `AGENTPAY_KEY`. `apw_…` dests are
-   accepted by SwarmGit but **not** yet by agentpay (P2PKH only).
+   public wallet ids (auxon/agentpay#7); secret 64-hex tokens are
+   refused. Internal sends record a receipt, not a BSV tx.
 3. **Repo home + name** for the entry (public, MIT).
 4. **Workers Paid plan:** does his Cloudflare account have it?
    (Required for the Artifacts open beta. Workers AI must also be on

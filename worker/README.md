@@ -13,7 +13,9 @@ On submit, eligible bounties run auto-verify (`src/autoverify.py`):
 acceptance tests against the fork plus a Clef diff review. Both must
 pass; otherwise defer. Settlement is DryRunSender by default;
 `AgentPaySender` goes live only with `SWARMSGIT_LIVE_SETTLEMENT=1` and
-secret `AGENTPAY_KEY`.
+secret `AGENTPAY_KEY`. P2PKH dests settle `live` (BSV txid);
+public `apw_…` dests settle `internal` (receipt `snd_…`). Never pass
+a 64-hex secret wallet token.
 
 Tests (fakes only, CPython):
 

@@ -4,7 +4,7 @@ Public and unauthenticated by design (it is the demo's visual), but
 the page itself is strictly read-only: this module only calls the
 store's READ methods (list_tasks, claims_for_task, forks_for_task,
 verifications_for_fork, merges_for_task, why_entries_for_merge,
-leaderboard). It never writes to D1, mints anything, or touches
+ledger_for_task, leaderboard). It never writes to D1, mints anything, or touches
 escrow. Every dynamic value is html-escaped. Repo tokens are never
 shown in full — claims persist only the last4 (see gitlib.claim_task).
 
@@ -266,7 +266,8 @@ def _pay_panel(address, sats=0):
         'It stays in escrow until a fork merges. The agent address is '
         'where escrow releases, not where you pay now. Ledger settlement '
         'is dry-run until SWARMSGIT_LIVE_SETTLEMENT + AGENTPAY_KEY, or the'
-        ' walletd puller, posts a txid.</p>'
+        ' walletd puller, posts a BSV txid (P2PKH) or an agentpay receipt'
+        ' (public apw_ dest).</p>'
         '<p class="mono addr" id="sg-escrow-addr">%s</p>'
         '<p class="mono">%s</p></div></div>' % (_qr_svg(uri), _e(address), _e(uri)))
 
@@ -393,7 +394,7 @@ async def render(store, pay_address=""):
 {_close_form(deferred)}
 <h2>📋 Tasks</h2>
 {''.join(cards) if cards else '<div class="card empty">No tasks posted yet.</div>'}
-<footer>escrow lock is a ledger line · auto-verify records tester=auto with Clef evidence · live payout needs a txid · never shows full repo tokens</footer>
+<footer>escrow lock is a ledger line · auto-verify records tester=auto with Clef evidence · paid payout needs a BSV txid or an agentpay receipt · never shows full repo tokens</footer>
 """
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -446,6 +447,7 @@ async def _task_card(store, t):
             f"<h3>Forks &amp; verification</h3>{_forks_section(forks)}"
             f"<h3>Disputes</h3>{_disputes_section(await store.disputes_for_task(task_id))}"
             f"<h3>Merge</h3>{_merges_section(merges)}"
+            f"<h3>Settlement</h3>{_settlement_section(await store.ledger_for_task(task_id))}"
             f"</div></details>")
 
 
@@ -534,6 +536,70 @@ def _forks_section(forks):
             f"<p class=\"task-meta\" style=\"margin:0 0 10px\">preview: {preview_html}</p>"
             f"{vtable}</div>")
     return "".join(parts)
+
+
+WOC_TX = "https://whatsonchain.com/tx/"
+
+
+def whatsonchain_tx_url(settlement, txid):
+    """WhatsOnChain link only for live on-chain BSV txids. Never for
+    internal snd_ receipts (those are not BSV txs)."""
+    if (settlement or "") != "live":
+        return ""
+    t = (txid or "").strip().lower()
+    if len(t) != 64 or any(c not in "0123456789abcdef" for c in t):
+        return ""
+    return WOC_TX + t
+
+
+def payout_proof_html(settlement, detail):
+    """Label a paid send: on-chain tx (linked) vs agentpay receipt (not)."""
+    detail = detail or {}
+    settlement = settlement or detail.get("settlement") or ""
+    if settlement == "internal":
+        rid = detail.get("receipt_id") or ""
+        return (
+            '<span class="mono">receipt %s</span>'
+            '<div class="task-meta">agentpay internal credit, not a BSV tx'
+            '</div>' % _e(rid or "—"))
+    if settlement == "live":
+        txid = (detail.get("txid") or "").strip()
+        url = whatsonchain_tx_url("live", txid)
+        if url:
+            return (
+                '<a href="%s">%s</a>'
+                '<div class="task-meta">on-chain BSV tx</div>'
+                % (_e(url), _e(txid)))
+        return (
+            '<span class="mono">%s</span>'
+            '<div class="task-meta">on-chain BSV tx</div>' % _e(txid or "—"))
+    if settlement == "pending":
+        return '<span class="task-meta">pending — no txid or receipt yet</span>'
+    return '<span class="task-meta">dry-run (no funds moved)</span>'
+
+
+def _settlement_section(ledger):
+    rows_src = [e for e in (ledger or [])
+                if e.get("kind") in ("payout", "payout_failed",
+                                     "payout_skipped", "release_requested",
+                                     "release_done")]
+    if not rows_src:
+        return '<div class="empty">No payout recorded yet.</div>'
+    rows = []
+    for e in rows_src:
+        detail = e.get("detail") or {}
+        rows.append(
+            '<tr><td><strong>%s</strong></td><td>%s</td>'
+            '<td class="mono">%s sats</td><td>%s</td><td>%s</td></tr>' % (
+                _e(e.get("agent") or detail.get("to") or "—"),
+                _e(e.get("kind")),
+                _e(int(e.get("sats") or 0)),
+                _e(e.get("settlement") or "—"),
+                payout_proof_html(e.get("settlement"), detail)))
+    return (
+        '<table><tr><th>agent</th><th>kind</th><th>sats</th>'
+        '<th>settlement</th><th>proof</th></tr>'
+        + "".join(rows) + "</table>")
 
 
 def _merges_section(merges):

@@ -12,8 +12,8 @@ Message kinds:
   {"kind": "merge", "task_id", "fork_id"}
       Run the merge gate (merge_gate.run_merge_gate against the fork's
       preview_url), record the merge decision, stage the why-graph, then
-      settle. A blocked gate returns the task to open. A live send
-      without a txid leaves the release pending.
+      settle. A blocked gate returns the task to open. A paying send
+      without a txid or receipt leaves the release pending.
   {"kind": "arbitrate", "task_id", "fork_id", "dispute_id"}
       dispute_fork queued this: ask Clef for a ruling (see arbiter.py);
       apply on confidence >= threshold, else defer to a human.
@@ -136,7 +136,7 @@ async def _on_merge(store, deps, msg):
                 task.get("escrow_address") or "", task.get("bounty_sats") or 0)
         settled = await gitlib.settle_task(store, deps["sender"], task_id)
         if settled.get("funds_moved"):
-            return  # live txid recorded; no puller needed
+            return  # txid or internal receipt recorded; no puller needed
         payout = next((p for p in settled.get("payouts") or []
                        if p.get("agent")), None)
         dest = (payout or {}).get("to") or ""

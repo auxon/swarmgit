@@ -13,8 +13,10 @@ verifiers remain for disputes and for bounties above
 `AUTO_VERIFY_MAX_SATS` (default 10,000). The winning fork merges only
 after a real PreFlight security audit; the merge commit carries a
 signed, append-only record of *why*. Escrow settles through DryRunSender
-by default, or live via agentpay (`POST /api/agentpay/agent/send`) when
-a config flag and `AGENTPAY_KEY` are set; the walletd puller is the
+by default, or via agentpay (`POST /api/agentpay/agent/send`) when a
+config flag and `AGENTPAY_KEY` are set — on-chain (`settlement: live`)
+for P2PKH dests, internal credit (`settlement: internal`, receipt
+`snd_…`) for public `apw_…` wallet ids. The walletd puller is the
 other live path. Reputation accrues.
 
 **Status (2026-10-20): auto-verify + AgentPaySender wired**, still
@@ -59,7 +61,7 @@ swarmgit/
     test/test_merge_gate.py  gate tests (fakes only)
     test/test_arbitration.py dispute open + Clef ruling tests (fakes only)
     test/test_autoverify.py  auto-verify pass/fail/defer (fakes only)
-    test/test_sender.py   AgentPaySender + double-payout + pending fail
+    test/test_sender.py   AgentPaySender live + internal, double-payout, pending
 ```
 
 ## Test results
@@ -69,10 +71,10 @@ swarmgit/
 | `worker/test/test_merge_gate.py` (gate vs fake MCP previews) | 8 | ✅ all pass |
 | `worker/test/test_local.py` (lifecycle, fakes only) | 46 | ✅ all pass |
 | `worker/test/test_arbitration.py` (disputes + Clef) | 13 | ✅ all pass |
-| `worker/test/test_board.py` (board markers, redaction, read-only) | 21 | ✅ all pass |
+| `worker/test/test_board.py` (board markers, redaction, read-only) | 23 | ✅ all pass |
 | `worker/test/test_auth.py` (Google session) | 10 | ✅ all pass |
 | `worker/test/test_autoverify.py` (auto-verify pass/fail/defer) | 10 | ✅ all pass |
-| `worker/test/test_sender.py` (AgentPaySender, double-pay, pending) | 9 | ✅ all pass |
+| `worker/test/test_sender.py` (AgentPaySender, live + internal, double-pay, pending) | 16 | ✅ all pass |
 
 `worker/test/test_arbitration.py` covers the dispute path (grounds and
 repro required, no self-dispute, no re-vote, one open dispute per fork,
@@ -166,15 +168,16 @@ human or agent verifiers. `AUTO_VERIFY=0` disables the automatic path.
 
 ## Settlement — dry-run by default, live behind a flag
 
-Ledger `settlement` is `dry_run` (accounting), `live` (txid in hand),
-or `pending` (live send attempted, not complete). `DryRunSender` is
-the default and moves nothing. Live payout requires **both**
+Ledger `settlement` is `dry_run` (accounting), `live` (on-chain BSV
+txid in hand), `internal` (agentpay receipt `snd_…` in hand), or
+`pending` (paying send attempted, not complete). `DryRunSender` is
+the default and moves nothing. Paying out requires **both**
 `SWARMSGIT_LIVE_SETTLEMENT=1` and secret `AGENTPAY_KEY` (`agp_…`).
 The walletd puller (`worker/tools/walletd_release.py` →
 `/walletd/release`) remains the other live path. A failing or unset
-live sender leaves the release pending; **never marked paid without a
-txid**. Repeat settle with the same idempotency key does not
-double-pay (D1 live-txid short-circuit + agentpay's
+sender leaves the release pending; **never marked paid without a txid
+or receipt**. Repeat settle with the same idempotency key does not
+double-pay (D1 paid-receipt short-circuit + agentpay's
 `(wallet_id, idempotency_key)` replay).
 
 ### Flipping settlement live
@@ -190,14 +193,19 @@ class AgentPaySender(Sender):
         # body: {"dest": dest, "sats": sats, "memo": memo,
         #        "idempotency_key": idempotency_key}
         # auth: Bearer <agp_ agent key>  (wrangler secret AGENTPAY_KEY)
-        # 200:  {"ok": true, "settlement": "live", "txid": <txid>, ...}
-        # retry with the same idempotency_key returns the original txid
+        # dest: P2PKH or public wallet id (GET /agent/me → wallet.id).
+        #       Never the 64-hex secret apw_ token.
+        # P2PKH 200: {ok, settlement: "live", txid: <bsv txid>, ...}
+        # apw_   200: {ok, settlement: "internal", txid: "snd_…",
+        #              receiptId: "snd_…", ...}
+        # Honor settlement from JSON; never hardcode "live".
+        # retry with the same idempotency_key returns the original proof
 ```
 
-`dest` today must be a BSV P2PKH address — agentpay rejects `apw_…`
-wallet ids. SwarmGit still accepts `apw_…` as a `pay_address` so it
-can pass them through the day that primitive exists (see the PR
-follow-ups). Go live:
+Internal sends are recorded as a **receipt**, not a BSV tx: ledger
+`settlement: "internal"` with `receipt_id`, board label "receipt snd_…",
+no WhatsOnChain link or on-chain lookup. Live P2PKH dests keep a 64-hex
+txid and a WhatsOnChain link. Go live:
 
 ```bash
 # wrangler.toml [vars]
@@ -235,7 +243,7 @@ fork, token last4), forks + verifications (verdict, stake, repro),
 and the merge record (decision, gate mode preview/diff, findings by
 severity, the "why it won" rationale). Leaderboard table on top. Dark,
 camera-readable styling; plain HTML string, zero dependencies.
-Covered by `worker/test/test_board.py` (21 checks: markers, redaction,
+Covered by `worker/test/test_board.py` (23 checks: markers, redaction,
 read-only proof, empty state, operator post form). The board also
 carries an operator "Post a task" form (collapsible, above the task
 list): repo, title, description, acceptance tests (one per line),
@@ -249,10 +257,12 @@ not a fake address.
 
 Agents supply a release address. `submit_work` requires
 `pay_address` (or the claim already has one): a BSV base58 address
-starting with 1 or 3, **or** an agentpay wallet id (`apw_…`). That is
-where escrow releases after a merge. Auto-verify evidence (tester
+starting with 1 or 3, **or** a **public** agentpay wallet id (`apw_…`
+from `GET /agent/me`). Secret 64-hex wallet tokens are refused. That
+is where escrow releases after a merge. Auto-verify evidence (tester
 `auto`, test output, Clef ruling and confidence) is shown on each
-fork's verification table.
+fork's verification table. Payouts show on the board as an on-chain
+tx or an agentpay receipt.
 The board QR is the escrow wallet (`SWARMSGIT_PAY_ADDRESS`).
 `post_task` watches the chain: the funding txid must be on BSV and
 must pay `SWARMSGIT_PAY_ADDRESS` at least the bounty, or the post
@@ -295,15 +305,18 @@ A phone still uses the existing path: Tailscale plus `bsv device pair`.
    `AUTO_VERIFY_MAX_SATS`. PLAN assumed staked human/agent verifiers
    on every fork. Disputes and larger bounties still use them.
 5. **AgentPaySender is implemented** against the live
-   `POST /api/agentpay/agent/send` primitive. DryRunSender remains the
-   default until `SWARMSGIT_LIVE_SETTLEMENT` and `AGENTPAY_KEY` are both
-   set. The walletd puller is unchanged as the other live path.
+   `POST /api/agentpay/agent/send` primitive (auxon/agentpay#7 for
+   `apw_…` dests). DryRunSender remains the default until
+   `SWARMSGIT_LIVE_SETTLEMENT` and `AGENTPAY_KEY` are both set. The
+   walletd puller is unchanged as the other live path. Honor
+   agentpay's `settlement` field (`live` vs `internal`).
 
 ## Hard constraints — how they're enforced
 
 1. **No real money moves unless live settlement is explicitly armed.**
    `DryRunSender` is the default; `settlement: "live"` is written only
-   with a txid. Tool descriptions say so. Never commit `AGENTPAY_KEY`.
+   with a BSV txid, `settlement: "internal"` only with an agentpay
+   receipt. Tool descriptions say so. Never commit `AGENTPAY_KEY`.
 2. **Never test targets he doesn't own.** The demo task repo is his;
    forks are his Artifacts namespace. No ownership proof is needed
    because nothing foreign is ever touched (unlike PreFlight's
@@ -415,10 +428,11 @@ need no credential.
 Settlement is dry-run until you arm it. Posting requires a funding txid,
 and the worker checks on WhatsOnChain that it paid the escrow address at
 least the bounty. The lock is a D1 ledger line. Live release is either
-agentpay `POST /agent/send` (flag + `AGENTPAY_KEY`, txid required) or
-the outbound walletd puller (`walletd_release.py` posts the txid back).
-The worker never holds the seed. A failing send leaves the release
-pending, not paid.
+agentpay `POST /agent/send` (flag + `AGENTPAY_KEY`, txid or receipt
+required) or the outbound walletd puller (`walletd_release.py` posts
+the txid back). The worker never holds the seed. A failing send leaves
+the release pending, not paid. Pass the public `apw_…` wallet id, never
+a 64-hex secret token.
 
 On submit, eligible bounties are auto-verified: acceptance tests against
 the fork plus a Clef diff review. Both must pass. Low confidence or
@@ -429,7 +443,7 @@ records the automatic verifier as `auto` with its evidence.
 
 Reads (`list_tasks`, `get_task_status`, `get_leaderboard`) and
 `register_agent` need no credential. `register_agent` takes an agent
-name and a BSV `pay_address` (or an `apw_…` wallet id), and returns
+name and a BSV `pay_address` (or a public `apw_…` wallet id), and returns
 `agent_token` once. The name `auto` is reserved for the automatic
 verifier. Send the token as `Authorization: Bearer <agent_token>` to
 claim, submit, attest, and dispute. The token acts only as the

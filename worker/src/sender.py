@@ -1,29 +1,38 @@
 """Settlement sender interface for SwarmGit.
 
 DryRunSender is the default: it records payout intent and moves
-nothing. Live sats move only when ALL of these hold:
+nothing. Real sats move only when ALL of these hold:
 
   * SWARMSGIT_LIVE_SETTLEMENT is truthy (wrangler var)
   * secret AGENTPAY_KEY (agp_…) is set
-  * AgentPaySender.send returns a txid
+  * AgentPaySender.send returns a txid (on-chain) or receipt (internal)
 
-The live primitive is agentpay's actual endpoint, inspected 2026-10-20:
+The live primitive is agentpay's actual endpoint, inspected 2026-10-20
+and updated for auxon/agentpay#7 (apw_ dests):
 
   POST https://entangleit.com/api/agentpay/agent/send
   Authorization: Bearer agp_…
   body: {dest, sats, memo, idempotency_key}
-  200:  {ok: true, settlement: "live", txid, dest, sats}
-  retry with the same (wallet, idempotency_key) returns the original txid
+  dest: BSV P2PKH (1…/3…) or public wallet id (apw_… from GET /agent/me).
+        Never the 64-hex secret wallet token.
+  200 P2PKH:    {ok, settlement: "live", txid: <bsv txid>, dest, sats}
+  200 apw_…:    {ok, settlement: "internal", txid: "snd_…",
+                 receiptId: "snd_…", dest, sats}
+  retry with the same (wallet, idempotency_key) returns the original
+  txid / receipt
 
 WalletDSender remains an alternative when SWARMSGIT_WALLETD_URL is set
 and live agentpay is not. The outbound walletd puller
 (tools/walletd_release.py) is the other alternative: a pending
 release_requested line, not an in-worker send.
 
-HARD: never mark a payout live without a txid. A failing or unset live
-sender leaves the release pending.
+HARD: never mark a payout paid without a txid or receipt. A failing
+or unset paying sender leaves the release pending. Honor agentpay's
+settlement field; never hardcode "live".
 """
 import json
+
+import gitlib
 
 
 class SendError(Exception):
@@ -41,7 +50,8 @@ class Sender:
 
     async def send(self, dest, sats, memo, idempotency_key=""):
         """Move sats to dest. Returns a receipt dict with at least:
-        {"ok": bool, "settlement": "live"|"dry_run", "txid": str|None}."""
+        {"ok": bool, "settlement": "live"|"internal"|"dry_run",
+         "txid": str|None, "receipt_id": str|None}."""
         raise NotImplementedError
 
 
@@ -58,10 +68,11 @@ class DryRunSender(Sender):
             raise SendError("refused: sats must be a non-negative int")
         intent = {"dest": dest, "sats": sats, "memo": memo,
                   "idempotency_key": idempotency_key or "",
-                  "settlement": "dry_run", "txid": None}
+                  "settlement": "dry_run", "txid": None,
+                  "receipt_id": None}
         self.intents.append(intent)
         return {"ok": True, "settlement": "dry_run", "txid": None,
-                "note": "dry-run: no funds moved"}
+                "receipt_id": None, "note": "dry-run: no funds moved"}
 
 
 class WalletDSender(Sender):
@@ -85,7 +96,7 @@ class WalletDSender(Sender):
         out = await walletd.send(self.http, self.url, dest, sats,
                                  memo or "swarmgit release")
         txid = out.get("txid")
-        if not txid:
+        if not gitlib.is_bsv_txid(txid):
             raise SendError("walletd send returned no txid")
         self.intents.append({"dest": dest, "sats": sats, "txid": txid,
                              "idempotency_key": idempotency_key or "",
@@ -95,12 +106,13 @@ class WalletDSender(Sender):
 
 
 class AgentPaySender(Sender):
-    """Live settlement via agentpay POST /agent/send.
+    """Settlement via agentpay POST /agent/send.
 
     Auth is a vaulted agp_ agent key (AGENTPAY_KEY), never in code.
-    dest is a BSV P2PKH address (agentpay currently rejects apw_ wallet
-    ids — SwarmGit still accepts them as a payout destination so we can
-    pass them through the day agentpay grows that primitive).
+    dest is a BSV P2PKH address (settlement=live, txid is on-chain) or
+    a public agentpay wallet id (settlement=internal, receipt is snd_…).
+    Secret 64-hex wallet tokens are refused here so they never leave
+    the worker as a pay dest.
     """
 
     settlement_mode = "live"
@@ -118,6 +130,10 @@ class AgentPaySender(Sender):
         dest = (dest or "").strip()
         if not dest:
             raise SendError("refused: dest is required")
+        if gitlib.is_agentpay_wallet_token(dest):
+            raise SendError(
+                "refused: dest looks like a wallet token; pass the "
+                "public wallet id (apw_…), never the 64-hex secret token")
         if not self.agent_key:
             raise SendError("refused: AGENTPAY_KEY is not configured")
         body = {"dest": dest, "sats": sats, "memo": (memo or "")[:200],
@@ -130,13 +146,7 @@ class AgentPaySender(Sender):
                 body=json.dumps(body))
         except Exception as e:
             raise SendError(f"agentpay send failed: {type(e).__name__}")
-        parsed = _parse_agentpay(res)
-        txid = parsed.get("txid")
-        if not txid:
-            raise SendError("agentpay send returned no txid")
-        receipt = {"ok": True, "settlement": "live", "txid": txid,
-                   "dest": parsed.get("dest") or dest,
-                   "sats": parsed.get("sats") or sats}
+        receipt = _receipt_from_parsed(_parse_agentpay(res), dest, sats)
         self.intents.append({**receipt,
                              "idempotency_key": idempotency_key or ""})
         return receipt
@@ -176,12 +186,48 @@ def _parse_agentpay(res):
     if data.get("ok") is False:
         raise SendError("agentpay send refused: %s"
                         % (data.get("error") or data))
-    txid = data.get("txid") or res.get("txid")
-    if not txid:
-        raise SendError("agentpay send returned no txid")
-    return {"txid": str(txid), "dest": data.get("dest"),
-            "sats": data.get("sats"),
-            "settlement": data.get("settlement") or "live"}
+    txid = data.get("txid")
+    receipt_id = data.get("receiptId") or data.get("receipt_id")
+    return {
+        "txid": str(txid) if txid else None,
+        "receipt_id": str(receipt_id) if receipt_id else None,
+        "dest": data.get("dest"),
+        "sats": data.get("sats"),
+        "settlement": data.get("settlement"),
+    }
+
+
+def _receipt_from_parsed(parsed, dest, sats):
+    """Honor agentpay's settlement field. Never default-allow / hardcode live."""
+    settlement = (parsed.get("settlement") or "").strip()
+    txid = parsed.get("txid")
+    receipt_id = parsed.get("receipt_id")
+    dest = parsed.get("dest") or dest
+    sats = parsed.get("sats") or sats
+    if not settlement:
+        rid = receipt_id or txid
+        if rid and gitlib.is_agentpay_receipt_id(rid):
+            settlement = "internal"
+        elif gitlib.is_bsv_txid(txid) and gitlib.is_bsv_address(dest):
+            settlement = "live"
+        else:
+            raise SendError("agentpay send returned no settlement")
+    if settlement == "internal":
+        rid = receipt_id or txid
+        if not rid:
+            raise SendError("agentpay send returned no receipt")
+        return {"ok": True, "settlement": "internal",
+                "txid": str(rid), "receipt_id": str(rid),
+                "dest": dest, "sats": sats}
+    if settlement == "live":
+        if not txid:
+            raise SendError("agentpay send returned no txid")
+        if not gitlib.is_bsv_txid(txid):
+            raise SendError("agentpay live send returned a non-BSV txid")
+        return {"ok": True, "settlement": "live",
+                "txid": str(txid).lower(), "dest": dest, "sats": sats}
+    raise SendError("agentpay send returned unknown settlement %r"
+                    % settlement)
 
 
 def choose_sender(env, http):
